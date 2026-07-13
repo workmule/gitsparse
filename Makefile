@@ -29,6 +29,14 @@ run:
 build:
 	@go build -o gitsparse .
 
+# 运行测试
+test:
+	@go test -v -timeout 60s .
+
+# 快速测试 (跳过网络/集成测试)
+test-short:
+	@go test -v -short -timeout 60s .
+
 # 清理输出
 clean:
 	@rm -rf $(OUTPUT) gitsparse
@@ -37,4 +45,4 @@ clean:
 clean-cache:
 	@rm -rf /tmp/gitsparse-cache
 
-.PHONY: run build clean clean-cache
+.PHONY: run build test test-short clean clean-cache

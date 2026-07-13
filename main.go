@@ -10,9 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// 版本号 — 每次发版修改此值 (格式: vx.x.x)
+// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v1.0.1'"
+const Version = "v1.0.0"
 
 // 全局设置
 var globalTimeout time.Duration
@@ -31,7 +36,13 @@ func main() {
 	cacheDir := flag.String("cache-dir", filepath.Join(os.TempDir(), cachePrefix), "Cache directory for cloned repos")
 	cacheTTL := flag.String("cache-ttl", "24h", "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
 	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
+	version := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("gitsparse %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 
 	if *repo == "" || *ref == "" || *dirs == "" {
 		fmt.Fprintln(os.Stderr, "[FAIL] -repo, -ref, -dirs are required")
