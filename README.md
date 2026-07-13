@@ -75,7 +75,7 @@ gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,.
 | `-ref` | （必填） | Git 引用：分支名、标签名或 commit SHA |
 | `-dirs` | （必填） | 要拉取的目录路径，多个用逗号分隔 |
 | `-output` | `.` | 输出目录 |
-| `-timeout` | `5m` | 每个网络操作的超时时间；`0` = 不限时 |
+| `-timeout` | `1m` | 每个网络操作的超时时间；`0` = 不限时 |
 | `-retries` | `3` | 网络操作失败后的重试次数 |
 | `-cache-dir` | `/tmp/gitsparse-cache` | 缓存目录 |
 | `-cache-ttl` | `24h` | 缓存 TTL；超过此时间的条目自动清理；`0` = 不清理 |

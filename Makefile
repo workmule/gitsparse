@@ -11,7 +11,7 @@ REF ?= main
 DIRS ?= numpy
 OUTPUT ?= ./output
 # 超时 (每个网络操作, 0=不限)
-TIMEOUT ?= 5m
+TIMEOUT ?= 1m
 # 重试次数 (超时或失败后自动重试)
 RETRIES ?= 3
 # 缓存 TTL (超过此时间的缓存自动清理, 0=不清理)
@@ -23,7 +23,7 @@ NO_CACHE ?= false
 run:
 	@go run . -repo "$(REPO)" -ref "$(REF)" -dirs "$(DIRS)" -output "$(OUTPUT)" \
 		-timeout "$(TIMEOUT)" -retries $(RETRIES) \
-		-cache-ttl "$(CACHE_TTL)" -no-cache $(NO_CACHE)
+		-cache-ttl "$(CACHE_TTL)" -no-cache=$(NO_CACHE)
 
 # 构建二进制
 build:

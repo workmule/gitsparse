@@ -17,7 +17,7 @@ import (
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x)
 // 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v1.0.1'"
-const Version = "v1.0.0"
+const Version = "v1.0.1"
 
 // 全局设置
 var globalTimeout time.Duration
@@ -31,7 +31,7 @@ func main() {
 	ref := flag.String("ref", "", "Git ref: branch name, tag, or commit SHA")
 	dirs := flag.String("dirs", "", "Comma-separated directory paths to pull")
 	output := flag.String("output", ".", "Output directory")
-	timeout := flag.String("timeout", "5m", "Timeout per network operation (clone/fetch/lfs); 0 = no timeout")
+	timeout := flag.String("timeout", "1m", "Timeout per network operation (clone/fetch/lfs); 0 = no timeout")
 	retries := flag.Int("retries", 3, "Retry count for network operations")
 	cacheDir := flag.String("cache-dir", filepath.Join(os.TempDir(), cachePrefix), "Cache directory for cloned repos")
 	cacheTTL := flag.String("cache-ttl", "24h", "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
