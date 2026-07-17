@@ -80,6 +80,7 @@ gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,.
 | `-cache-dir` | `/tmp/gitsparse-cache` | 缓存目录 |
 | `-cache-ttl` | `24h` | 缓存 TTL；超过此时间的条目自动清理；`0` = 不清理 |
 | `-no-cache` | `false` | 跳过缓存，强制重新克隆 |
+| `-no-lfs` | `false` | 跳过 Git LFS 拉取（LFS 文件将保持为指针，非真实内容） |
 
 ### 示例
 
@@ -169,7 +170,7 @@ make clean-cache
 |---|---|---|
 | `git clone --sparse` | Git 2.25+ | 不使用，`--no-checkout` 已保证工作区为空 |
 | `git sparse-checkout set` 子命令 | Git 2.25+ | 不使用，改用 `git config core.sparseCheckout=true` + 手写 `.git/info/sparse-checkout` 文件 |
-| `core.sparseCheckoutCone` 配置 | Git 2.27+ | 尝试设置，失败时静默忽略，回退非 cone 模式 |
+| `core.sparseCheckoutCone` 配置 | Git 2.27+ | 不使用，采用非 cone 模式（兼容性更好，行为更精确） |
 
 ### 实际兼容版本
 

@@ -3,6 +3,9 @@
 *.pyc
 .codebuddy/memory
 
+# 个人测试用例
+testcase
+
 # 过滤生成的中间文件
 output
 gitsparse

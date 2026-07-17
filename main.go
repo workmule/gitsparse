@@ -33,7 +33,9 @@ const Version = "v1.0.1"
 //    - 改用底层 `git config core.sparseCheckout true` + 手写 .git/info/sparse-checkout
 //    - 见 setupSparseCheckout() 函数, 兼容 Git 2.19+ (甚至 1.7+)
 //
-// 3. `core.sparseCheckoutCone` (Git 2.27+) 失败时静默忽略, 回退非 cone 模式
+// 3. 不使用 cone 模式 (core.sparseCheckoutCone, Git 2.27+):
+//    cone 模式手写 sparse-checkout 文件格式有特殊要求, 且根目录文件会被默认检出.
+//    非 cone 模式 (Git 1.7+) 行为更精确, 兼容性最好, 是最保守方案.
 //
 // 4. 启动时执行 `git --version` 打印版本 (见 main 函数), 便于流水线日志排查兼容问题
 //
@@ -60,6 +62,7 @@ func main() {
 	cacheDir := flag.String("cache-dir", filepath.Join(os.TempDir(), cachePrefix), "Cache directory for cloned repos")
 	cacheTTL := flag.String("cache-ttl", "24h", "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
 	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
+	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
 	version := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -187,9 +190,9 @@ func main() {
 		t0 = time.Now()
 	}
 
-	// Step 2: 配置 sparse checkout (cone 模式, 每次都重新设置, 因为 dirs 可能不同)
-	// 用底层 config + 手写 .git/info/sparse-checkout 方式, 兼容 Git 2.19+ (无 sparse-checkout 子命令)
-	log("Step 2: 配置 sparse checkout (cone 模式) %s", strings.Join(dirList, " "))
+	// Step 2: 配置 sparse checkout (每次都重新设置, 因为 dirs 可能不同)
+	// 用底层 config + 手写 .git/info/sparse-checkout 方式 (非 cone 模式), 兼容 Git 2.19+
+	log("Step 2: 配置 sparse checkout %s", strings.Join(dirList, " "))
 	t1 := time.Now()
 	if err := setupSparseCheckout(tmpDir, dirList); err != nil {
 		fail("配置 sparse checkout 失败: %v", err)
@@ -214,21 +217,36 @@ func main() {
 		}
 		fail("git checkout 失败: %v", err)
 	}
+
+	// Step 3a: 重新应用 sparse checkout 规则到工作区.
+	// 必要性: 缓存复用场景下 `git checkout` 可能是 no-op (Already on branch), 不会按新 sparse
+	// 配置增删文件; 新 clone 场景下 --no-checkout 后 checkout 也需要 read-tree 来应用 sparse.
+	// read-tree -mu HEAD 会按 .git/info/sparse-checkout 规则更新工作区和索引.
+	log("Step 3a: git read-tree -mu HEAD (应用 sparse 规则到工作区)")
+	if err := runGit(tmpDir, "read-tree", "-mu", "HEAD"); err != nil {
+		fail("git read-tree 失败: %v", err)
+	}
 	log("Step 3 完成 (%s)", time.Since(t2))
 
 	// Step 3b: LFS pull (只拉取 sparse 目录内的大文件, 带重试)
-	if hasLFSFiles(tmpDir) {
+	// ⚠️ LFS 拉取失败会中断 (失败时大文件是 LFS 指针而非真实内容, 输出不可用).
+	//    如需跳过 LFS (例如未安装 git-lfs 或不需要大文件), 使用 -no-lfs 参数.
+	if !*noLFS && hasLFSFiles(tmpDir) {
 		lfsIncludes := lfsIncludePatterns(dirList)
-		log("Step 3b: git lfs pull --include=%s", strings.Join(lfsIncludes, ","))
+		// ⚠️ 多个模式必须用逗号拼接成单个字符串作为 --include 的值,
+		//    不能作为多个独立参数传递 (否则 git 会把第 2 个起当作 remote 名, 报 "Invalid remote name")
+		lfsIncludeArg := strings.Join(lfsIncludes, ",")
+		log("Step 3b: git lfs pull --include=%s", lfsIncludeArg)
 		t2b := time.Now()
 		runGit("", "lfs", "install")
-		lfsArgs := append([]string{"lfs", "pull", "--include"}, lfsIncludes...)
 		if err := runGitRetry(func() error {
-			return runGit(tmpDir, lfsArgs...)
+			return runGit(tmpDir, "lfs", "pull", "--include", lfsIncludeArg)
 		}, "lfs pull"); err != nil {
-			log("  LFS pull 失败 (可能未安装 git-lfs): %v", err)
+			fail("LFS pull 失败: %v (如未安装 git-lfs 或不需要大文件, 使用 -no-lfs 跳过)", err)
 		}
 		log("Step 3b 完成 (%s)", time.Since(t2b))
+	} else if *noLFS {
+		log("Step 3b: 跳过 LFS pull (-no-lfs)")
 	}
 
 	// Step 4: 拷贝目录到输出位置
@@ -261,35 +279,28 @@ func main() {
 	}
 }
 
-// setupSparseCheckout 用底层 config + 手写 .git/info/sparse-checkout 文件方式配置 cone 模式 sparse checkout.
+// setupSparseCheckout 用底层 config + 手写 .git/info/sparse-checkout 文件方式配置 sparse checkout.
 // 兼容 Git 2.19+ (无需 sparse-checkout 子命令, 该子命令在 2.25 才引入).
 // ⚠️ 不要改回 `git sparse-checkout set --cone` 子命令, 流水线环境可能不支持.
 //    详见文件顶部 "Git 版本兼容性注意事项".
 //
-// 为什么这样实现:
-//   - `git sparse-checkout set` 子命令在 Git 2.25+ 才有, 流水线环境可能更老
-//   - `git config core.sparseCheckout=true` + 手写 sparse-checkout 文件是底层机制,
-//     Git 1.7+ 即支持, 是最保守的兼容方案
-//   - `--no-checkout` clone 后工作区为空, 配置 sparseCheckout 后 `git checkout` 才真正生效
+// 为什么用非 cone 模式 (不设 core.sparseCheckoutCone):
+//   - cone 模式 (Git 2.27+) 手写 sparse-checkout 文件格式有特殊要求, 且根目录文件会被默认检出
+//   - 非 cone 模式 (Git 1.7+) 行为更精确: 只检出文件中列出的路径, 根文件不会多拉
+//   - 非 cone 模式兼容性最好, 是最保守方案
 //
-// cone 模式文件格式:
-//   - 首行: /* (cone 模式标记, 启用目录树模式)
-//   - 后续: 每行一个目录, 末尾带 /, 表示该目录及其下所有内容检出
-//   - cone 模式下不需要 /* 前缀模式, Git 会自动处理
+// 非 cone 模式 sparse-checkout 文件格式:
+//   - 每行一个路径模式, 末尾带 / 表示目录及其所有内容
+//   - 不需要 /* 标记行 (那是 cone 模式的格式)
 func setupSparseCheckout(repoDir string, dirs []string) error {
-	// 1. 开启 core.sparseCheckout
+	// 1. 开启 core.sparseCheckout (非 cone 模式, 不设 core.sparseCheckoutCone)
 	if err := runGit(repoDir, "config", "core.sparseCheckout", "true"); err != nil {
 		return fmt.Errorf("config core.sparseCheckout: %w", err)
 	}
-	// 2. 开启 core.sparseCheckoutCone (cone 模式, Git 2.27+, 不支持时忽略错误)
-	if err := runGit(repoDir, "config", "core.sparseCheckoutCone", "true"); err != nil {
-		log("  (core.sparseCheckoutCone 配置失败, 将使用非 cone 模式: %v)", err)
-	}
 
-	// 3. 手写 .git/info/sparse-checkout 文件
+	// 2. 手写 .git/info/sparse-checkout 文件 (非 cone 格式)
 	sparseFile := filepath.Join(repoDir, ".git", "info", "sparse-checkout")
 	var lines []string
-	lines = append(lines, "/*") // cone 模式标记行
 	for _, d := range dirs {
 		// 规范化: 去除首部 ./, 确保末尾带 /
 		d = strings.TrimPrefix(d, "./")
@@ -298,7 +309,10 @@ func setupSparseCheckout(repoDir string, dirs []string) error {
 		}
 		lines = append(lines, d)
 	}
-	content := strings.Join(lines, "\n") + "\n"
+	content := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		content += "\n"
+	}
 	if err := os.WriteFile(sparseFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("写 sparse-checkout 文件: %w", err)
 	}
