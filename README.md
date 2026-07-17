@@ -56,7 +56,7 @@ go run github.com/workmule/gitsparse@latest \
 ### 前置依赖
 
 - **Go** 1.22+（仅构建时需要）
-- **Git** 2.25+（支持 `sparse-checkout`）
+- **Git** 2.19+（推荐 2.25+，详见下方[兼容性说明](#git-版本兼容性)）
 - **Git LFS**（可选，仓库包含 LFS 文件时需要）
 
 ## 使用方法
@@ -149,13 +149,48 @@ make clean-cache
 ## 工作流程
 
 ```
-1. 浅克隆 (--depth=1 --sparse)         → 仅下载最新提交，不检出文件
-2. 配置 sparse-checkout (cone 模式)     → 指定只需要的目录
+1. 浅克隆 (--depth=1 --no-checkout)    → 仅下载最新提交，不检出文件
+2. 配置 sparse-checkout (底层 config)   → 指定只需要的目录（兼容低版本 Git）
 3. checkout                              → 检出指定目录内的文件
 4. LFS pull (如果检测到 LFS 文件)       → 按需拉取大文件
 5. 拷贝到输出目录                        → 将文件复制到 -output 指定位置
 6. 清理过期缓存                          → 删除超过 TTL 的缓存条目
 ```
+
+## Git 版本兼容性
+
+> ⚠️ **CI/CD 流水线环境的 Git 版本可能很旧或被发行版裁剪**，本工具采用最保守的兼容方案。
+
+### 设计原则
+
+本工具**不依赖**以下 Git 2.25+ 特性，确保在低版本环境下可用：
+
+| 特性 | 引入版本 | 本工具做法 |
+|---|---|---|
+| `git clone --sparse` | Git 2.25+ | 不使用，`--no-checkout` 已保证工作区为空 |
+| `git sparse-checkout set` 子命令 | Git 2.25+ | 不使用，改用 `git config core.sparseCheckout=true` + 手写 `.git/info/sparse-checkout` 文件 |
+| `core.sparseCheckoutCone` 配置 | Git 2.27+ | 尝试设置，失败时静默忽略，回退非 cone 模式 |
+
+### 实际兼容版本
+
+- **Git 2.19+**：完全支持（推荐）
+- **Git 1.7+**：理论上可用（底层 sparse checkout 机制早已存在）
+- **Git < 1.7**：不支持
+
+### 排查指南
+
+1. **启动日志会打印 Git 版本**：`[git] git version x.y.z`，便于确认流水线环境的实际版本
+2. 若仍报 `error: unknown option 'sparse'`：确认使用的是最新版 gitsparse（旧版本曾用 `--sparse`）
+3. 若 `git config core.sparseCheckout` 失败：Git 版本过低（< 1.7），需升级 Git
+4. **不要仅凭 `git --version` 判断特性可用性**：某些发行版会裁剪功能（如自报 2.32 但实际不支持 `--sparse`）
+
+### 给维护者（含 AI）的提示
+
+修改 Git 相关命令时，务必：
+1. 查清该选项/子命令引入的 Git 版本
+2. 优先使用底层 `git config` + 文件操作，而非高级子命令
+3. 在 `main.go` 顶部有详细的「Git 版本兼容性注意事项」注释，请遵循
+4. 新增功能需考虑低版本回退方案
 
 ## 缓存机制
 

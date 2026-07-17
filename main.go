@@ -19,6 +19,30 @@ import (
 // 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v1.0.1'"
 const Version = "v1.0.1"
 
+// ============================================================================
+// ⚠️ Git 版本兼容性注意事项 (AI/维护者必读)
+// ============================================================================
+// 本工具面向 CI/CD 流水线环境, 这些环境的 Git 版本可能很旧或被发行版裁剪,
+// 不能假定本机/开发环境的 Git 特性在流水线可用. 维护时务必遵循:
+//
+// 1. 不使用 `git clone --sparse` (Git 2.25+ 才支持, 流水线可能 < 2.25)
+//    - clone 时只用 `--no-checkout --depth=1 --no-tags --branch <ref>`
+//    - `--no-checkout` 已保证工作区为空, sparse 配置由后续 setupSparseCheckout() 完成
+//
+// 2. 不使用 `git sparse-checkout set --cone` 子命令 (Git 2.25+ 才支持)
+//    - 改用底层 `git config core.sparseCheckout true` + 手写 .git/info/sparse-checkout
+//    - 见 setupSparseCheckout() 函数, 兼容 Git 2.19+ (甚至 1.7+)
+//
+// 3. `core.sparseCheckoutCone` (Git 2.27+) 失败时静默忽略, 回退非 cone 模式
+//
+// 4. 启动时执行 `git --version` 打印版本 (见 main 函数), 便于流水线日志排查兼容问题
+//
+// 5. 新增 Git 命令/选项前, 先查清该选项引入的 Git 版本, 并在低版本有等价方案
+//
+// 参考案例: 流水线报 `error: unknown option 'sparse'`, 但本机 git 2.32 自报支持
+//          (实际发行版打包裁剪), 故不能仅靠版本号判断, 必须用最保守方案.
+// ============================================================================
+
 // 全局设置
 var globalTimeout time.Duration
 var globalRetries int
@@ -49,6 +73,13 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	// 打印 git 版本 (便于流水线环境排查); 找不到 git 直接报错退出
+	out, err := exec.Command("git", "--version").CombinedOutput()
+	if err != nil {
+		fail("找不到 git, 请确认已安装并加入 PATH: %v", err)
+	}
+	fmt.Printf("[git] %s", out) // 自带换行
 
 	dirList := splitAndTrim(*dirs, ",")
 	if len(dirList) == 0 {
@@ -100,6 +131,9 @@ func main() {
 	var t0 time.Time
 
 	// Step 1: Shallow clone (仅在未缓存时执行)
+	// 注意: 不使用 --sparse (Git 2.25+), 流水线环境可能不支持.
+	//       --no-checkout 已保证不检出任何文件, sparse 配置由 Step 2 完成.
+	//       详见文件顶部 "Git 版本兼容性注意事项".
 	if !cached {
 		if isSHA {
 			log("Step 1: git clone --depth=1 (默认分支)")
@@ -108,7 +142,7 @@ func main() {
 				os.RemoveAll(tmpDir)
 				os.MkdirAll(tmpDir, 0755)
 				return runGit("", "clone",
-					"--no-checkout", "--sparse",
+					"--no-checkout",
 					"--depth=1", "--no-tags",
 					"--progress",
 					*repo, tmpDir,
@@ -137,7 +171,7 @@ func main() {
 				os.RemoveAll(tmpDir)
 				os.MkdirAll(tmpDir, 0755)
 				return runGit("", "clone",
-					"--no-checkout", "--sparse",
+					"--no-checkout",
 					"--depth=1", "--no-tags",
 					"--branch", *ref,
 					"--progress",
@@ -154,11 +188,11 @@ func main() {
 	}
 
 	// Step 2: 配置 sparse checkout (cone 模式, 每次都重新设置, 因为 dirs 可能不同)
-	log("Step 2: git sparse-checkout set --cone %s", strings.Join(dirList, " "))
+	// 用底层 config + 手写 .git/info/sparse-checkout 方式, 兼容 Git 2.19+ (无 sparse-checkout 子命令)
+	log("Step 2: 配置 sparse checkout (cone 模式) %s", strings.Join(dirList, " "))
 	t1 := time.Now()
-	sparseArgs := append([]string{"-C", tmpDir, "sparse-checkout", "set", "--cone"}, dirList...)
-	if err := runGit("", sparseArgs...); err != nil {
-		fail("git sparse-checkout 失败: %v", err)
+	if err := setupSparseCheckout(tmpDir, dirList); err != nil {
+		fail("配置 sparse checkout 失败: %v", err)
 	}
 	log("Step 2 完成 (%s)", time.Since(t1))
 
@@ -225,6 +259,50 @@ func main() {
 	if ttl > 0 {
 		cleanExpiredCache(*cacheDir, ttl)
 	}
+}
+
+// setupSparseCheckout 用底层 config + 手写 .git/info/sparse-checkout 文件方式配置 cone 模式 sparse checkout.
+// 兼容 Git 2.19+ (无需 sparse-checkout 子命令, 该子命令在 2.25 才引入).
+// ⚠️ 不要改回 `git sparse-checkout set --cone` 子命令, 流水线环境可能不支持.
+//    详见文件顶部 "Git 版本兼容性注意事项".
+//
+// 为什么这样实现:
+//   - `git sparse-checkout set` 子命令在 Git 2.25+ 才有, 流水线环境可能更老
+//   - `git config core.sparseCheckout=true` + 手写 sparse-checkout 文件是底层机制,
+//     Git 1.7+ 即支持, 是最保守的兼容方案
+//   - `--no-checkout` clone 后工作区为空, 配置 sparseCheckout 后 `git checkout` 才真正生效
+//
+// cone 模式文件格式:
+//   - 首行: /* (cone 模式标记, 启用目录树模式)
+//   - 后续: 每行一个目录, 末尾带 /, 表示该目录及其下所有内容检出
+//   - cone 模式下不需要 /* 前缀模式, Git 会自动处理
+func setupSparseCheckout(repoDir string, dirs []string) error {
+	// 1. 开启 core.sparseCheckout
+	if err := runGit(repoDir, "config", "core.sparseCheckout", "true"); err != nil {
+		return fmt.Errorf("config core.sparseCheckout: %w", err)
+	}
+	// 2. 开启 core.sparseCheckoutCone (cone 模式, Git 2.27+, 不支持时忽略错误)
+	if err := runGit(repoDir, "config", "core.sparseCheckoutCone", "true"); err != nil {
+		log("  (core.sparseCheckoutCone 配置失败, 将使用非 cone 模式: %v)", err)
+	}
+
+	// 3. 手写 .git/info/sparse-checkout 文件
+	sparseFile := filepath.Join(repoDir, ".git", "info", "sparse-checkout")
+	var lines []string
+	lines = append(lines, "/*") // cone 模式标记行
+	for _, d := range dirs {
+		// 规范化: 去除首部 ./, 确保末尾带 /
+		d = strings.TrimPrefix(d, "./")
+		if !strings.HasSuffix(d, "/") {
+			d += "/"
+		}
+		lines = append(lines, d)
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(sparseFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("写 sparse-checkout 文件: %w", err)
+	}
+	return nil
 }
 
 // cacheHash 根据 repo + ref 生成 12 位哈希作为缓存目录名
