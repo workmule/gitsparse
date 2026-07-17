@@ -130,18 +130,18 @@ func main() {
 	// Step 1: 准备缓存目录的 git 仓库 (clone 或 fetch+reset)
 	if !cached {
 		// ---- 非缓存: 全新 clone ----
-		// 删除已有目录 (可能是 -no-cache 强制刷新, 或上次 clone 残留)
-		if _, err := os.Stat(tmpDir); err == nil {
-			log("  清理旧目录: %s", tmpDir)
-			os.RemoveAll(tmpDir)
-		}
-		os.MkdirAll(filepath.Dir(tmpDir), 0755)
+		// 清理已有目录 (可能是 -no-cache 强制刷新, 或上次 clone 残留);
+		// 重试时也通过 prepareCloneTarget 重复清理 (在 clone 闭包内调用)
+		prepareCloneTarget(tmpDir)
 
 		if isSHA {
 			// commit SHA: clone 默认分支, 再 fetch 指定 SHA
 			log("Step 1: git clone --depth=1 (默认分支, 随后 fetch SHA)")
 			t0 = time.Now()
 			if err := runGitRetry(func() error {
+				// 每次重试前清理可能因上次超时/中断残留的目标目录,
+				// 否则 git clone 会报 "destination path already exists and is not an empty directory"
+				prepareCloneTarget(tmpDir)
 				return runGit("", "clone",
 					"--depth=1", "--no-tags",
 					"--progress",
@@ -173,6 +173,8 @@ func main() {
 			log("Step 1: git clone --depth=1 --branch %s", *ref)
 			t0 = time.Now()
 			if err := runGitRetry(func() error {
+				// 每次重试前清理可能因上次超时/中断残留的目标目录
+				prepareCloneTarget(tmpDir)
 				return runGit("", "clone",
 					"--depth=1", "--no-tags",
 					"--branch", *ref,
@@ -275,6 +277,17 @@ func main() {
 	if ttl > 0 {
 		cleanExpiredCache(*cacheDir, ttl)
 	}
+}
+
+// prepareCloneTarget 清理 clone 目标目录并确保父目录存在.
+// 用于首次 clone 前以及重试前: git clone 超时/中断会残留部分写入的目录,
+// 直接重试会因 "destination path already exists and is not an empty directory" 失败.
+func prepareCloneTarget(target string) {
+	if _, err := os.Stat(target); err == nil {
+		log("  清理目标目录: %s", target)
+		os.RemoveAll(target)
+	}
+	os.MkdirAll(filepath.Dir(target), 0755)
 }
 
 // cacheHash 根据 repo + ref 生成 12 位哈希作为缓存目录名

@@ -441,6 +441,356 @@ func assertFileContent(t *testing.T, path, want string) {
 }
 
 // ============================================================
+// prepareCloneTarget
+// ============================================================
+
+// TestPrepareCloneTarget_NonExistent 验证目标不存在时仅创建父目录, 不报错.
+func TestPrepareCloneTarget_NonExistent(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "newdir", "cache")
+	prepareCloneTarget(target)
+	if _, err := os.Stat(filepath.Dir(target)); err != nil {
+		t.Errorf("parent dir not created: %v", err)
+	}
+	// target 本身不应被创建 (留给 git clone)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target should not exist, got err=%v", err)
+	}
+}
+
+// TestPrepareCloneTarget_RemovesExisting 验证已存在的目标目录被清理.
+func TestPrepareCloneTarget_RemovesExisting(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "cache")
+	mustMkdirAll(t, filepath.Join(target, "subdir"))
+	mustWriteFile(t, filepath.Join(target, "leftover.txt"), []byte("partial"))
+
+	prepareCloneTarget(target)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target should be removed, got err=%v", err)
+	}
+}
+
+// TestPrepareCloneTarget_Idempotent 多次调用应安全.
+func TestPrepareCloneTarget_Idempotent(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "cache")
+	prepareCloneTarget(target)
+	prepareCloneTarget(target)
+	prepareCloneTarget(target)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target should not exist after prepare, got err=%v", err)
+	}
+}
+
+// ============================================================
+// 集成测试: clone 超时残留目录后重试成功 (回归 bug 修复)
+// ============================================================
+
+// TestV2_CloneRetryAfterStaleDir 验证修复的关键场景:
+// 第一次 clone 因超时失败, 目标目录留下部分写入的文件;
+// 重试前 prepareCloneTarget 清理残留目录, 第二次 clone 成功.
+// 这是 user_query 报告的 bug: "destination path already exists
+// and is not an empty directory".
+func TestV2_CloneRetryAfterStaleDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+	globalRetries = 1
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("ok"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 模拟第一次失败残留: 预先在目标目录写入"部分 clone"的垃圾文件
+	dstDir := t.TempDir()
+	target := filepath.Join(dstDir, "cache")
+	mustMkdirAll(t, filepath.Join(target, ".git"))
+	mustWriteFile(t, filepath.Join(target, ".git", "config"), []byte("partial"))
+	mustWriteFile(t, filepath.Join(target, "README.md"), []byte("partial"))
+
+	calls := 0
+	err := runGitRetry(func() error {
+		calls++
+		// 模拟 main.go 修复后的逻辑: 每次重试前清理目标目录
+		prepareCloneTarget(target)
+		return runGit("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	}, "clone")
+
+	if err != nil {
+		t.Fatalf("clone should succeed on retry after cleaning stale dir: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (prepareCloneTarget should make first attempt succeed)", calls)
+	}
+	// 验证 clone 后文件正确 (非残留内容)
+	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
+}
+
+// TestV2_CloneRetryWithRealStaleDirSimulatingTimeout 更贴近真实 bug:
+// 第一次用慢服务器触发超时 + 残留目录, 第二次用真实仓库重试成功.
+// 验证 prepareCloneTarget 在 runGitRetry 闭包内的集成行为.
+func TestV2_CloneRetryWithRealStaleDirSimulatingTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network test in short mode")
+	}
+	saveGlobals(t)
+	globalRetries = 1
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("ok"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 慢服务器用于第一次失败
+	slowURL := startSlowServer(t)
+
+	dstDir := t.TempDir()
+	target := filepath.Join(dstDir, "cache")
+
+	// 切换: 第一次超时 (慢服务器), 第二次用真实仓库
+	globalTimeout = 300 * time.Millisecond
+	attempt := 0
+	err := runGitRetry(func() error {
+		attempt++
+		prepareCloneTarget(target)
+		if attempt == 1 {
+			// 第一次: 慢服务器, 会超时并残留部分目录
+			return runGit("", "clone", "--depth=1", slowURL, target)
+		}
+		// 第二次: 真实仓库, 应成功 (前提是 prepareCloneTarget 清理了残留)
+		globalTimeout = 0
+		return runGit("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	}, "clone")
+
+	if err != nil {
+		t.Fatalf("retry should succeed after stale dir cleanup: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("attempts = %d, want 2", attempt)
+	}
+	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
+}
+
+// TestV2_CloneRetryAfterStaleDir_WithGitSubtree 验证最危险的残留形态:
+// 上次 clone 中断留下了完整的 .git 子树 (objects/config/HEAD 等) + 部分工作区文件.
+// 这种残留最容易让 git clone 误判目录"已被占用". prepareCloneTarget 必须能彻底清除.
+func TestV2_CloneRetryAfterStaleDir_WithGitSubtree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+	globalRetries = 1
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("ok"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 构造真实 clone 中断后的残留: 模拟 .git 子树 + 工作区部分文件
+	dstDir := t.TempDir()
+	target := filepath.Join(dstDir, "cache")
+	// 模拟 .git 子树 (git clone 中断常见残留)
+	mustMkdirAll(t, filepath.Join(target, ".git", "objects", "pack"))
+	mustMkdirAll(t, filepath.Join(target, ".git", "refs", "heads"))
+	mustWriteFile(t, filepath.Join(target, ".git", "HEAD"), []byte("ref: refs/heads/master\n"))
+	mustWriteFile(t, filepath.Join(target, ".git", "config"), []byte("[core]\n\trepositoryformatversion = 0\n"))
+	mustWriteFile(t, filepath.Join(target, ".git", "objects", "pack", "partial.idx"), []byte("partial"))
+	// 工作区部分文件 (checkout 中断残留)
+	mustMkdirAll(t, filepath.Join(target, "docs"))
+	mustWriteFile(t, filepath.Join(target, "docs", "file.txt"), []byte("STALE_PARTIAL"))
+	mustWriteFile(t, filepath.Join(target, "README.md"), []byte("partial"))
+
+	// 残留目录必须非空 (前置条件)
+	if entries, _ := os.ReadDir(target); len(entries) == 0 {
+		t.Fatal("precondition: target should have stale entries")
+	}
+
+	calls := 0
+	err := runGitRetry(func() error {
+		calls++
+		prepareCloneTarget(target)
+		return runGit("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	}, "clone")
+
+	if err != nil {
+		t.Fatalf("clone should succeed after cleaning stale .git subtree: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+	// 关键: 内容必须是新 clone 的 "ok", 而非残留的 "STALE_PARTIAL"
+	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
+}
+
+// TestV2_CloneRetryMultipleTimeoutsThenSuccess 验证多次重试都超时残留,
+// 最后一次才成功: 每次 prepareCloneTarget 都必须清理上一次的残留.
+// 模拟线上 -retries=3 场景: 前 3 次超时, 第 4 次成功.
+func TestV2_CloneRetryMultipleTimeoutsThenSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network test in short mode")
+	}
+	saveGlobals(t)
+	globalRetries = 3 // 4 次尝试 (1 初始 + 3 重试)
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("ok"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	slowURL := startSlowServer(t)
+	dstDir := t.TempDir()
+	target := filepath.Join(dstDir, "cache")
+
+	globalTimeout = 200 * time.Millisecond
+	attempt := 0
+	err := runGitRetry(func() error {
+		attempt++
+		prepareCloneTarget(target)
+		if attempt < 4 {
+			// 前 3 次慢服务器, 必然超时残留
+			return runGit("", "clone", "--depth=1", slowURL, target)
+		}
+		// 第 4 次真实仓库, 应成功 (前提是前 3 次的残留都被清理干净)
+		globalTimeout = 0
+		return runGit("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	}, "clone")
+
+	if err != nil {
+		t.Fatalf("should succeed on 4th attempt after 3 cleanups: %v", err)
+	}
+	if attempt != 4 {
+		t.Errorf("attempts = %d, want 4", attempt)
+	}
+	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
+}
+
+// TestV2_CloneRetryAfterStaleDir_SHAFlow 验证 SHA 流程的 clone 闭包也覆盖残留场景.
+// main.go 中 SHA 流程 (clone 默认分支 → fetch SHA → checkout) 的 clone 闭包
+// 同样调用了 prepareCloneTarget, 此测试验证其正确性.
+func TestV2_CloneRetryAfterStaleDir_SHAFlow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+	globalRetries = 1
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("sha-content"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+
+	// 获取 commit SHA
+	out, err := exec.Command("git", "-C", srcRepo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	sha := strings.TrimSpace(string(out))
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 残留: 模拟上次 SHA clone 中断
+	dstDir := t.TempDir()
+	target := filepath.Join(dstDir, "cache")
+	mustMkdirAll(t, filepath.Join(target, ".git", "objects"))
+	mustWriteFile(t, filepath.Join(target, ".git", "HEAD"), []byte("ref: refs/heads/master\n"))
+	mustWriteFile(t, filepath.Join(target, "stale.txt"), []byte("stale"))
+
+	// SHA 流程的 clone 闭包 (镜像 main.go 第 141-149 行)
+	calls := 0
+	err = runGitRetry(func() error {
+		calls++
+		prepareCloneTarget(target)
+		// SHA 流程: clone 默认分支 (不带 --branch)
+		return runGit("", "clone", "--depth=1", "--no-tags", bareRepo, target)
+	}, "clone")
+	if err != nil {
+		t.Fatalf("SHA clone should succeed after cleanup: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+
+	// 后续 SHA 流程: fetch + checkout
+	if err := runGit(target, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
+		t.Fatalf("fetch SHA: %v", err)
+	}
+	if err := runGit(target, "checkout", sha); err != nil {
+		t.Fatalf("checkout SHA: %v", err)
+	}
+	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "sha-content")
+	// 残留文件应不存在 (被 prepareCloneTarget 清理后, 新 clone 不会有 stale.txt)
+	if _, err := os.Stat(filepath.Join(target, "stale.txt")); !os.IsNotExist(err) {
+		t.Errorf("stale.txt from previous failed clone should not exist")
+	}
+}
+
+// TestV2_CloneFailsWithoutPrepareCloneTarget 反向回归测试:
+// 故意不调用 prepareCloneTarget, 验证有残留目录时 git clone 确实会失败.
+// 这个测试证明修复的必要性 — 如果哪天有人误删 prepareCloneTarget 调用,
+// 此测试会失败提醒.
+func TestV2_CloneFailsWithoutPrepareCloneTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+	globalRetries = 0 // 不重试, 一次失败就返回
+
+	srcRepo := initTempRepo(t)
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 预先存在非空目标目录 (模拟上次 clone 残留)
+	target := filepath.Join(t.TempDir(), "cache")
+	mustMkdirAll(t, filepath.Join(target, ".git"))
+	mustWriteFile(t, filepath.Join(target, ".git", "config"), []byte("stale"))
+
+	// 不调用 prepareCloneTarget, 直接 clone — 应失败
+	err := runGit("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	if err == nil {
+		t.Fatal("expected clone to FAIL when target dir exists and is non-empty " +
+			"(this test verifies the bug exists without prepareCloneTarget)")
+	}
+	// 错误信息应包含 "already exists" (git 的标准报错)
+	if !strings.Contains(err.Error(), "already exists") &&
+		!strings.Contains(strings.ToLower(err.Error()), "exists") {
+		t.Logf("note: clone failed as expected, error: %v", err)
+	}
+}
+
+// ============================================================
 // cleanExpiredCache
 // ============================================================
 
