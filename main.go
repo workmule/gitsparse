@@ -16,33 +16,27 @@ import (
 )
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x)
-// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v1.0.1'"
-const Version = "v1.0.1"
+// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.0.0'"
+const Version = "v2.0.0"
 
 // ============================================================================
-// ⚠️ Git 版本兼容性注意事项 (AI/维护者必读)
+// 设计说明 (v2.0.0 重构)
 // ============================================================================
-// 本工具面向 CI/CD 流水线环境, 这些环境的 Git 版本可能很旧或被发行版裁剪,
-// 不能假定本机/开发环境的 Git 特性在流水线可用. 维护时务必遵循:
+// 旧版 (v1.x) 用 sparse-checkout 机制 (--no-checkout + core.sparseCheckout +
+// 手写 .git/info/sparse-checkout + read-tree), 在不同 Git 版本 / cone 模式 /
+// 缓存复用场景下反复出问题 (文件丢失、skip-worktree 残留、no-op checkout 等).
 //
-// 1. 不使用 `git clone --sparse` (Git 2.25+ 才支持, 流水线可能 < 2.25)
-//    - clone 时只用 `--no-checkout --depth=1 --no-tags --branch <ref>`
-//    - `--no-checkout` 已保证工作区为空, sparse 配置由后续 setupSparseCheckout() 完成
+// 新版 (v2.0) 改用最简单直接的 git 用法:
+//   1. 缓存目录就是一个完整的 git 仓库 (含工作区, 全量检出)
+//   2. 首次: git clone --depth=1 <repo> <cachedir> (直接检出)
+//      - 分支/标签: 加 --branch <ref>
+//      - commit SHA: clone 默认分支后 fetch 该 SHA
+//   3. 缓存复用: git fetch --depth=1 origin <ref> + git reset --hard <ref>
+//   4. 从缓存目录拷贝指定子目录到 -output 位置
 //
-// 2. 不使用 `git sparse-checkout set --cone` 子命令 (Git 2.25+ 才支持)
-//    - 改用底层 `git config core.sparseCheckout true` + 手写 .git/info/sparse-checkout
-//    - 见 setupSparseCheckout() 函数, 兼容 Git 2.19+ (甚至 1.7+)
-//
-// 3. 不使用 cone 模式 (core.sparseCheckoutCone, Git 2.27+):
-//    cone 模式手写 sparse-checkout 文件格式有特殊要求, 且根目录文件会被默认检出.
-//    非 cone 模式 (Git 1.7+) 行为更精确, 兼容性最好, 是最保守方案.
-//
-// 4. 启动时执行 `git --version` 打印版本 (见 main 函数), 便于流水线日志排查兼容问题
-//
-// 5. 新增 Git 命令/选项前, 先查清该选项引入的 Git 版本, 并在低版本有等价方案
-//
-// 参考案例: 流水线报 `error: unknown option 'sparse'`, 但本机 git 2.32 自报支持
-//          (实际发行版打包裁剪), 故不能仅靠版本号判断, 必须用最保守方案.
+// 不再依赖 sparse-checkout / cone 模式 / read-tree, 兼容性最好, 逻辑最简单.
+// 代价: 缓存目录会检出全部文件 (而非只检出指定目录), 但 --depth=1 浅克隆
+//       本身只下载最新提交的对象, 工作区文件是本地 checkout, 不增加网络流量.
 // ============================================================================
 
 // 全局设置
@@ -112,40 +106,43 @@ func main() {
 	log("配置: timeout=%s, retries=%d, cache=%s, ttl=%s",
 		durStr(globalTimeout), globalRetries, boolStr(*noCache, "off", *cacheDir), durStr(ttl))
 
-	// 生成缓存 key: repo + ref 的哈希 (dirs 不影响 clone, 只影响 sparse checkout)
+	// 生成缓存 key: repo + ref 的哈希 (dirs 不影响 clone, 只影响拷贝哪些目录)
 	cacheKey := cacheHash(*repo, *ref)
 	tmpDir := filepath.Join(*cacheDir, cacheKey)
 
-	// 检查缓存是否可用
+	// 检查缓存是否可用: 判断 .git 目录是否存在
 	cached := false
-	if !*noCache {
+	if *noCache {
+		log("缓存已禁用 (-no-cache), 强制重新克隆")
+	} else {
 		if info, err := os.Stat(filepath.Join(tmpDir, ".git")); err == nil && info.IsDir() {
 			cached = true
 			log("缓存命中: %s", tmpDir)
+		} else {
+			log("缓存未命中, 克隆到: %s", tmpDir)
 		}
-	}
-
-	if !cached {
-		log("缓存未命中, 克隆到: %s", tmpDir)
 	}
 
 	// 检测 ref 类型: commit SHA 还是 branch/tag
 	isSHA := isCommitSHA(*ref)
 	var t0 time.Time
 
-	// Step 1: Shallow clone (仅在未缓存时执行)
-	// 注意: 不使用 --sparse (Git 2.25+), 流水线环境可能不支持.
-	//       --no-checkout 已保证不检出任何文件, sparse 配置由 Step 2 完成.
-	//       详见文件顶部 "Git 版本兼容性注意事项".
+	// Step 1: 准备缓存目录的 git 仓库 (clone 或 fetch+reset)
 	if !cached {
+		// ---- 非缓存: 全新 clone ----
+		// 删除已有目录 (可能是 -no-cache 强制刷新, 或上次 clone 残留)
+		if _, err := os.Stat(tmpDir); err == nil {
+			log("  清理旧目录: %s", tmpDir)
+			os.RemoveAll(tmpDir)
+		}
+		os.MkdirAll(filepath.Dir(tmpDir), 0755)
+
 		if isSHA {
-			log("Step 1: git clone --depth=1 (默认分支)")
+			// commit SHA: clone 默认分支, 再 fetch 指定 SHA
+			log("Step 1: git clone --depth=1 (默认分支, 随后 fetch SHA)")
 			t0 = time.Now()
 			if err := runGitRetry(func() error {
-				os.RemoveAll(tmpDir)
-				os.MkdirAll(tmpDir, 0755)
 				return runGit("", "clone",
-					"--no-checkout",
 					"--depth=1", "--no-tags",
 					"--progress",
 					*repo, tmpDir,
@@ -166,15 +163,17 @@ func main() {
 			}, "fetch"); err != nil {
 				fail("git fetch %s 失败: %v", *ref, err)
 			}
+			// 切换到指定 commit (detached HEAD)
+			if err := runGit(tmpDir, "checkout", "--progress", *ref); err != nil {
+				fail("git checkout %s 失败: %v", *ref, err)
+			}
 			log("Step 1b 完成 (%s)", time.Since(t0b))
 		} else {
-			log("Step 1: git clone --depth=1 (ref=%s)", *ref)
+			// 分支/标签: 直接 clone --branch <ref>
+			log("Step 1: git clone --depth=1 --branch %s", *ref)
 			t0 = time.Now()
 			if err := runGitRetry(func() error {
-				os.RemoveAll(tmpDir)
-				os.MkdirAll(tmpDir, 0755)
 				return runGit("", "clone",
-					"--no-checkout",
 					"--depth=1", "--no-tags",
 					"--branch", *ref,
 					"--progress",
@@ -186,49 +185,48 @@ func main() {
 			log("Step 1 完成 (%s)", time.Since(t0))
 		}
 	} else {
-		log("Step 1: 跳过 clone (缓存复用)")
+		// ---- 缓存命中: fetch + reset --hard 更新到指定版本 ----
+		// fetch 拉取远端最新提交, 然后 reset --hard 把工作区对齐到目标版本.
+		// fetch 失败不致命: 可能是离线运行, 继续用缓存旧版本.
+		// 注意: 浅克隆 fetch 若被超时打断会残留 .git/shallow.lock, 导致后续 fetch 全部失败.
+		//       fetch 前先清理残留锁文件.
+		log("Step 1: 缓存复用, 拉取最新更新")
 		t0 = time.Now()
-	}
 
-	// Step 2: 配置 sparse checkout (每次都重新设置, 因为 dirs 可能不同)
-	// 用底层 config + 手写 .git/info/sparse-checkout 方式 (非 cone 模式), 兼容 Git 2.19+
-	log("Step 2: 配置 sparse checkout %s", strings.Join(dirList, " "))
-	t1 := time.Now()
-	if err := setupSparseCheckout(tmpDir, dirList); err != nil {
-		fail("配置 sparse checkout 失败: %v", err)
-	}
-	log("Step 2 完成 (%s)", time.Since(t1))
-
-	// Step 3: checkout
-	checkoutRef := *ref
-	if isSHA {
-		checkoutRef = "FETCH_HEAD"
-	}
-	log("Step 3: git checkout %s (sparse 检出 cone 内文件)", checkoutRef)
-	t2 := time.Now()
-	if err := runGit(tmpDir, "checkout", "--progress", checkoutRef); err != nil {
-		// 缓存可能过期 (分支已更新), 清除缓存重试
-		if cached {
-			log("  checkout 失败, 清除缓存重试...")
-			os.RemoveAll(tmpDir)
-			cached = false
-			// 重新 clone (递归处理简单起见直接 fail, 下次运行会重新克隆)
-			fail("缓存已清除, 请重新运行")
+		shallowLock := filepath.Join(tmpDir, ".git", "shallow.lock")
+		if _, err := os.Stat(shallowLock); err == nil {
+			os.Remove(shallowLock)
+			log("  清理残留锁文件: .git/shallow.lock")
 		}
-		fail("git checkout 失败: %v", err)
+
+		if err := runGitRetry(func() error {
+			return runGit(tmpDir, "fetch",
+				"--depth=1", "--no-tags",
+				"--progress",
+				"origin", *ref,
+			)
+		}, "fetch"); err != nil {
+			log("  fetch 失败, 继续使用缓存旧版本: %v", err)
+		} else {
+			// fetch 成功, 把工作区对齐到目标版本.
+			// - 分支/标签: reset --hard origin/<ref> (远端跟踪分支)
+			// - commit SHA: reset --hard <sha> (fetch 已拉到该 commit)
+			resetTarget := *ref
+			if !isSHA {
+				resetTarget = "origin/" + *ref
+			}
+			log("  git reset --hard %s", resetTarget)
+			if err := runGit(tmpDir, "reset", "--hard", resetTarget); err != nil {
+				// reset 失败可能是 ref 不存在或缓存损坏, 清除缓存提示重新运行
+				log("  reset 失败, 清除缓存目录: %s", tmpDir)
+				os.RemoveAll(tmpDir)
+				fail("缓存已清除 (%s), 请重新运行 (reset --hard %s 失败: %v)", tmpDir, resetTarget, err)
+			}
+		}
+		log("Step 1 完成 (%s)", time.Since(t0))
 	}
 
-	// Step 3a: 重新应用 sparse checkout 规则到工作区.
-	// 必要性: 缓存复用场景下 `git checkout` 可能是 no-op (Already on branch), 不会按新 sparse
-	// 配置增删文件; 新 clone 场景下 --no-checkout 后 checkout 也需要 read-tree 来应用 sparse.
-	// read-tree -mu HEAD 会按 .git/info/sparse-checkout 规则更新工作区和索引.
-	log("Step 3a: git read-tree -mu HEAD (应用 sparse 规则到工作区)")
-	if err := runGit(tmpDir, "read-tree", "-mu", "HEAD"); err != nil {
-		fail("git read-tree 失败: %v", err)
-	}
-	log("Step 3 完成 (%s)", time.Since(t2))
-
-	// Step 3b: LFS pull (只拉取 sparse 目录内的大文件, 带重试)
+	// Step 2: LFS pull (只拉取指定目录内的大文件, 带重试)
 	// ⚠️ LFS 拉取失败会中断 (失败时大文件是 LFS 指针而非真实内容, 输出不可用).
 	//    如需跳过 LFS (例如未安装 git-lfs 或不需要大文件), 使用 -no-lfs 参数.
 	if !*noLFS && hasLFSFiles(tmpDir) {
@@ -236,7 +234,7 @@ func main() {
 		// ⚠️ 多个模式必须用逗号拼接成单个字符串作为 --include 的值,
 		//    不能作为多个独立参数传递 (否则 git 会把第 2 个起当作 remote 名, 报 "Invalid remote name")
 		lfsIncludeArg := strings.Join(lfsIncludes, ",")
-		log("Step 3b: git lfs pull --include=%s", lfsIncludeArg)
+		log("Step 2: git lfs pull --include=%s", lfsIncludeArg)
 		t2b := time.Now()
 		runGit("", "lfs", "install")
 		if err := runGitRetry(func() error {
@@ -244,13 +242,13 @@ func main() {
 		}, "lfs pull"); err != nil {
 			fail("LFS pull 失败: %v (如未安装 git-lfs 或不需要大文件, 使用 -no-lfs 跳过)", err)
 		}
-		log("Step 3b 完成 (%s)", time.Since(t2b))
+		log("Step 2 完成 (%s)", time.Since(t2b))
 	} else if *noLFS {
-		log("Step 3b: 跳过 LFS pull (-no-lfs)")
+		log("Step 2: 跳过 LFS pull (-no-lfs)")
 	}
 
-	// Step 4: 拷贝目录到输出位置
-	log("Step 4: 拷贝到输出目录")
+	// Step 3: 拷贝目录到输出位置
+	log("Step 3: 拷贝到输出目录")
 	t3 := time.Now()
 	for _, dir := range dirList {
 		src := filepath.Join(tmpDir, dir)
@@ -269,54 +267,14 @@ func main() {
 			fail("拷贝失败 %s: %v", dir, err)
 		}
 	}
-	log("Step 4 完成 (%s)", time.Since(t3))
+	log("Step 3 完成 (%s)", time.Since(t3))
 
 	log("全部完成, 总耗时 %s", time.Since(t0))
 
-	// Step 5: 清理过期缓存
+	// Step 4: 清理过期缓存
 	if ttl > 0 {
 		cleanExpiredCache(*cacheDir, ttl)
 	}
-}
-
-// setupSparseCheckout 用底层 config + 手写 .git/info/sparse-checkout 文件方式配置 sparse checkout.
-// 兼容 Git 2.19+ (无需 sparse-checkout 子命令, 该子命令在 2.25 才引入).
-// ⚠️ 不要改回 `git sparse-checkout set --cone` 子命令, 流水线环境可能不支持.
-//    详见文件顶部 "Git 版本兼容性注意事项".
-//
-// 为什么用非 cone 模式 (不设 core.sparseCheckoutCone):
-//   - cone 模式 (Git 2.27+) 手写 sparse-checkout 文件格式有特殊要求, 且根目录文件会被默认检出
-//   - 非 cone 模式 (Git 1.7+) 行为更精确: 只检出文件中列出的路径, 根文件不会多拉
-//   - 非 cone 模式兼容性最好, 是最保守方案
-//
-// 非 cone 模式 sparse-checkout 文件格式:
-//   - 每行一个路径模式, 末尾带 / 表示目录及其所有内容
-//   - 不需要 /* 标记行 (那是 cone 模式的格式)
-func setupSparseCheckout(repoDir string, dirs []string) error {
-	// 1. 开启 core.sparseCheckout (非 cone 模式, 不设 core.sparseCheckoutCone)
-	if err := runGit(repoDir, "config", "core.sparseCheckout", "true"); err != nil {
-		return fmt.Errorf("config core.sparseCheckout: %w", err)
-	}
-
-	// 2. 手写 .git/info/sparse-checkout 文件 (非 cone 格式)
-	sparseFile := filepath.Join(repoDir, ".git", "info", "sparse-checkout")
-	var lines []string
-	for _, d := range dirs {
-		// 规范化: 去除首部 ./, 确保末尾带 /
-		d = strings.TrimPrefix(d, "./")
-		if !strings.HasSuffix(d, "/") {
-			d += "/"
-		}
-		lines = append(lines, d)
-	}
-	content := strings.Join(lines, "\n")
-	if len(lines) > 0 {
-		content += "\n"
-	}
-	if err := os.WriteFile(sparseFile, []byte(content), 0644); err != nil {
-		return fmt.Errorf("写 sparse-checkout 文件: %w", err)
-	}
-	return nil
 }
 
 // cacheHash 根据 repo + ref 生成 12 位哈希作为缓存目录名

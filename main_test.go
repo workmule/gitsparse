@@ -273,222 +273,8 @@ func TestLfsIncludePatterns_JoinForIncludeArg(t *testing.T) {
 }
 
 // ============================================================
-// setupSparseCheckout (兼容低版本 Git 的底层 config + 文件方式)
+// hasLFSFiles
 // ============================================================
-
-// TestSetupSparseCheckout_FileContent 验证生成的 .git/info/sparse-checkout 文件内容:
-// - 每个目录占一行, 末尾带 "/"
-// - "./" 前缀被去除
-// - 非 cone 模式, 不含 /* 标记行
-func TestSetupSparseCheckout_FileContent(t *testing.T) {
-	repo := initTempRepo(t)
-	dirs := []string{"src/vs", "build", "./docs"}
-
-	if err := setupSparseCheckout(repo, dirs); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-
-	sparseFile := filepath.Join(repo, ".git", "info", "sparse-checkout")
-	data, err := os.ReadFile(sparseFile)
-	if err != nil {
-		t.Fatalf("read sparse-checkout: %v", err)
-	}
-
-	want := "src/vs/\nbuild/\ndocs/\n"
-	if string(data) != want {
-		t.Errorf("sparse-checkout content = %q\nwant = %q", string(data), want)
-	}
-}
-
-// TestSetupSparseCheckout_SingleDir 单个目录场景
-func TestSetupSparseCheckout_SingleDir(t *testing.T) {
-	repo := initTempRepo(t)
-	if err := setupSparseCheckout(repo, []string{"numpy"}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-	sparseFile := filepath.Join(repo, ".git", "info", "sparse-checkout")
-	data, _ := os.ReadFile(sparseFile)
-	want := "numpy/\n"
-	if string(data) != want {
-		t.Errorf("got %q, want %q", string(data), want)
-	}
-}
-
-// TestSetupSparseCheckout_EmptyDirs 空目录列表: 文件为空
-func TestSetupSparseCheckout_EmptyDirs(t *testing.T) {
-	repo := initTempRepo(t)
-	if err := setupSparseCheckout(repo, []string{}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-	sparseFile := filepath.Join(repo, ".git", "info", "sparse-checkout")
-	data, _ := os.ReadFile(sparseFile)
-	want := ""
-	if string(data) != want {
-		t.Errorf("got %q, want %q", string(data), want)
-	}
-}
-
-// TestSetupSparseCheckout_TrailingSlashNormalized 目录已带 "/" 不重复添加
-func TestSetupSparseCheckout_TrailingSlashNormalized(t *testing.T) {
-	repo := initTempRepo(t)
-	if err := setupSparseCheckout(repo, []string{"docs/"}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-	sparseFile := filepath.Join(repo, ".git", "info", "sparse-checkout")
-	data, _ := os.ReadFile(sparseFile)
-	if strings.Contains(string(data), "docs//") {
-		t.Errorf("double slash detected: %q", string(data))
-	}
-}
-
-// TestSetupSparseCheckout_ConfigSet 验证 core.sparseCheckout 被设为 true,
-// 且 core.sparseCheckoutCone 未被设置 (使用非 cone 模式, 兼容性最好)
-func TestSetupSparseCheckout_ConfigSet(t *testing.T) {
-	repo := initTempRepo(t)
-	if err := setupSparseCheckout(repo, []string{"src"}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-	old := globalTimeout
-	globalTimeout = 0
-	defer func() { globalTimeout = old }()
-
-	// core.sparseCheckout 应为 true
-	out, err := exec.Command("git", "-C", repo, "config", "core.sparseCheckout").Output()
-	if err != nil {
-		t.Fatalf("git config read core.sparseCheckout: %v", err)
-	}
-	if strings.TrimSpace(string(out)) != "true" {
-		t.Errorf("core.sparseCheckout = %q, want 'true'", strings.TrimSpace(string(out)))
-	}
-
-	// core.sparseCheckoutCone 不应被设置 (非 cone 模式)
-	_, err = exec.Command("git", "-C", repo, "config", "core.sparseCheckoutCone").Output()
-	if err == nil {
-		t.Error("core.sparseCheckoutCone should NOT be set (non-cone mode for compatibility)")
-	}
-}
-
-// TestSetupSparseCheckout_NonExistentRepo 不存在的 repoDir 应报错
-func TestSetupSparseCheckout_NonExistentRepo(t *testing.T) {
-	err := setupSparseCheckout(filepath.Join(t.TempDir(), "nonexistent"), []string{"src"})
-	if err == nil {
-		t.Fatal("expected error for non-existent repo dir")
-	}
-}
-
-// TestSetupSparseCheckout_EndToEndSparseCheckout 端到端: setupSparseCheckout 后 checkout
-// 只检出指定目录, 验证底层 config 方式与子命令方式行为等价 (兼容低版本 Git 的核心保证)
-func TestSetupSparseCheckout_EndToEndSparseCheckout(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-	saveGlobals(t)
-	globalTimeout = 0
-
-	// 源仓库: 含 docs/ 和 src/ 两个目录
-	srcRepo := initTempRepo(t)
-	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
-	mustWriteFile(t, filepath.Join(srcRepo, "docs", "guide.md"), []byte("# Guide\n"))
-	mustMkdirAll(t, filepath.Join(srcRepo, "src"))
-	mustWriteFile(t, filepath.Join(srcRepo, "src", "main.go"), []byte("package main\n"))
-	mustRunGit(t, srcRepo, "add", ".")
-	mustRunGit(t, srcRepo, "commit", "-m", "add docs and src")
-
-	// bare 克隆作为远程
-	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
-		t.Fatalf("clone --bare: %v", err)
-	}
-
-	// 用本工具的方式: --no-checkout (不用 --sparse) + setupSparseCheckout + checkout
-	dst := filepath.Join(t.TempDir(), "checkout")
-	if err := runGit("", "clone", "--no-checkout", "--depth=1", bareRepo, dst); err != nil {
-		t.Fatalf("clone: %v", err)
-	}
-	if err := setupSparseCheckout(dst, []string{"docs"}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-	if err := runGit(dst, "checkout", "HEAD"); err != nil {
-		t.Fatalf("checkout: %v", err)
-	}
-
-	// docs/guide.md 应存在
-	if _, err := os.Stat(filepath.Join(dst, "docs", "guide.md")); err != nil {
-		t.Errorf("docs/guide.md not found: %v", err)
-	}
-	// src/main.go 不应存在 (在 cone 外)
-	if _, err := os.Stat(filepath.Join(dst, "src", "main.go")); err == nil {
-		t.Error("src/main.go should not exist (outside sparse cone)")
-	}
-	// README.md 不应存在 (在 cone 外)
-	if _, err := os.Stat(filepath.Join(dst, "README.md")); err == nil {
-		t.Error("README.md should not exist (outside sparse cone)")
-	}
-}
-
-// TestSetupSparseCheckout_ReapplyAfterCache 模拟缓存复用场景:
-// 仓库已 checkout (工作区有全部文件), 改 sparse 配置后必须重新应用 sparse 规则到工作区,
-// 否则 git checkout 在 "Already on branch" 时是 no-op, 不会按新 sparse 规则增删文件.
-//
-// 回归 bug: 缓存命中时 Step 3 的 `git checkout main` 输出 "Already on 'main'",
-// 工作区保持旧状态 (上次 sparse 或全量检出), 导致指定目录可能不存在.
-func TestSetupSparseCheckout_ReapplyAfterCache(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-	saveGlobals(t)
-	globalTimeout = 0
-
-	// 源仓库: 含 docs/ 和 src/
-	srcRepo := initTempRepo(t)
-	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
-	mustWriteFile(t, filepath.Join(srcRepo, "docs", "guide.md"), []byte("# Guide\n"))
-	mustMkdirAll(t, filepath.Join(srcRepo, "src"))
-	mustWriteFile(t, filepath.Join(srcRepo, "src", "main.go"), []byte("package main\n"))
-	mustRunGit(t, srcRepo, "add", ".")
-	mustRunGit(t, srcRepo, "commit", "-m", "add docs and src")
-
-	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
-		t.Fatalf("clone --bare: %v", err)
-	}
-
-	// 模拟缓存: 第一次全量 clone + checkout (无 sparse, 工作区有所有文件)
-	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := runGit("", "clone", "--no-checkout", bareRepo, cacheDir); err != nil {
-		t.Fatalf("clone: %v", err)
-	}
-	if err := runGit(cacheDir, "checkout", "HEAD"); err != nil {
-		t.Fatalf("checkout: %v", err)
-	}
-	// 确认缓存里两个目录都在
-	if _, err := os.Stat(filepath.Join(cacheDir, "docs", "guide.md")); err != nil {
-		t.Fatalf("cache setup: docs/guide.md missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "src", "main.go")); err != nil {
-		t.Fatalf("cache setup: src/main.go missing: %v", err)
-	}
-
-	// 现在改 sparse 配置: 只要 docs/
-	if err := setupSparseCheckout(cacheDir, []string{"docs"}); err != nil {
-		t.Fatalf("setupSparseCheckout: %v", err)
-	}
-
-	// 关键: checkout 在 "Already on branch" 时是 no-op, 不会应用新 sparse 规则.
-	// 必须用 read-tree -mu HEAD 重新应用 sparse checkout.
-	if err := runGit(cacheDir, "read-tree", "-mu", "HEAD"); err != nil {
-		t.Fatalf("read-tree: %v", err)
-	}
-
-	// 验证: docs/ 应存在, src/ 应被移除
-	if _, err := os.Stat(filepath.Join(cacheDir, "docs", "guide.md")); err != nil {
-		t.Errorf("docs/guide.md should exist: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "src", "main.go")); err == nil {
-		t.Error("src/main.go should be removed by sparse checkout reapply")
-	}
-}
-
 
 func TestHasLFSFiles_NoFile(t *testing.T) {
 	dir := t.TempDir()
@@ -886,46 +672,206 @@ func TestRunGit_NonExistentDir(t *testing.T) {
 	}
 }
 
-func TestRunGit_LocalCloneAndSparse(t *testing.T) {
+// ============================================================
+// 集成测试: v2 简化流程 (clone + fetch + reset + copyDir)
+// ============================================================
+
+// TestV2_FullClone_Checkout_CopyDir 端到端验证 v2 简化流程:
+// 1. git clone --depth=1 --branch <ref> <repo> <cachedir> (全量检出, 不用 sparse)
+// 2. 从缓存目录拷贝指定子目录到输出
+// 验证: 指定目录的文件存在, 内容正确
+func TestV2_FullClone_Checkout_CopyDir(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 	saveGlobals(t)
 	globalTimeout = 0
 
-	// Create source repo with some structure
+	// 源仓库: docs/ + src/ 两个目录
 	srcRepo := initTempRepo(t)
 	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
 	mustWriteFile(t, filepath.Join(srcRepo, "docs", "guide.md"), []byte("# Guide\n"))
+	mustMkdirAll(t, filepath.Join(srcRepo, "src"))
+	mustWriteFile(t, filepath.Join(srcRepo, "src", "main.go"), []byte("package main\n"))
+	// 多种扩展名文件 (回归 v1 sparse cone 模式 bug)
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "data.json"), []byte(`{"id":1}`))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "config.xml"), []byte("<c/>"))
 	mustRunGit(t, srcRepo, "add", ".")
-	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs and src")
 
-	// Create bare clone
+	// bare 克隆作为远程
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
 	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
-	// Sparse clone from bare repo
-	dst := filepath.Join(t.TempDir(), "checkout")
-	if err := runGit("", "clone", "--no-checkout", "--sparse", "--depth=1", bareRepo, dst); err != nil {
-		t.Fatalf("sparse clone: %v", err)
-	}
-	if err := runGit(dst, "sparse-checkout", "set", "--cone", "docs"); err != nil {
-		t.Fatalf("sparse-checkout set: %v", err)
-	}
-	if err := runGit(dst, "checkout", "HEAD"); err != nil {
-		t.Fatalf("checkout: %v", err)
+	// v2 流程: 全量 clone (不用 --no-checkout, 不用 --sparse)
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := runGit("", "clone", "--depth=1", "--no-tags",
+		"-b", "master", bareRepo, cacheDir); err != nil {
+		t.Fatalf("clone: %v", err)
 	}
 
-	// docs/guide.md should exist
-	if _, err := os.Stat(filepath.Join(dst, "docs", "guide.md")); err != nil {
-		t.Errorf("docs/guide.md not found after sparse checkout: %v", err)
+	// 验证缓存里全部文件都存在 (v2 不用 sparse, 工作区是全量的)
+	if _, err := os.Stat(filepath.Join(cacheDir, "docs", "guide.md")); err != nil {
+		t.Fatalf("docs/guide.md missing in cache: %v", err)
 	}
-	// README.md should NOT exist (not in cone)
-	if _, err := os.Stat(filepath.Join(dst, "README.md")); err == nil {
-		t.Error("README.md should not exist (outside sparse cone)")
+	if _, err := os.Stat(filepath.Join(cacheDir, "src", "main.go")); err != nil {
+		t.Fatalf("src/main.go missing in cache: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "README.md")); err != nil {
+		t.Fatalf("README.md missing in cache: %v", err)
+	}
+
+	// 拷贝 docs/ 到输出目录 (模拟 Step 3)
+	outputDir := filepath.Join(t.TempDir(), "output")
+	src := filepath.Join(cacheDir, "docs")
+	dst := filepath.Join(outputDir, "docs")
+	os.MkdirAll(filepath.Dir(dst), 0755)
+	if err := copyDir(src, dst); err != nil {
+		t.Fatalf("copyDir: %v", err)
+	}
+
+	// 验证输出目录: docs/ 下所有扩展名文件都在 (v1 cone 模式 bug 回归)
+	assertFileContent(t, filepath.Join(dst, "guide.md"), "# Guide\n")
+	assertFileContent(t, filepath.Join(dst, "data.json"), `{"id":1}`)
+	assertFileContent(t, filepath.Join(dst, "config.xml"), "<c/>")
+}
+
+// TestV2_CacheReuse_FetchReset 验证缓存复用流程:
+// 第一次 clone 拿到 v1, 远端更新到 v2, 第二次 fetch + reset --hard 后拿到 v2.
+func TestV2_CacheReuse_FetchReset(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+
+	// 源仓库: 初始 v1
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "version.txt"), []byte("v1"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "v1")
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 第一次: 全量 clone (建立缓存)
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := runGit("", "clone", "--depth=1", "--no-tags",
+		"-b", "master", bareRepo, cacheDir); err != nil {
+		t.Fatalf("first clone: %v", err)
+	}
+	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v1")
+
+	// 远端更新: v1 → v2
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "version.txt"), []byte("v2"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "v2")
+	if err := runGit(srcRepo, "push", bareRepo, "master"); err != nil {
+		t.Fatalf("push v2: %v", err)
+	}
+
+	// 第二次: 缓存复用, fetch + reset --hard origin/master
+	if err := runGit(cacheDir, "fetch", "--depth=1", "--no-tags", "origin", "master"); err != nil {
+		t.Fatalf("fetch on cache hit: %v", err)
+	}
+	if err := runGit(cacheDir, "reset", "--hard", "origin/master"); err != nil {
+		t.Fatalf("reset --hard after fetch: %v", err)
+	}
+
+	// 关键断言: 缓存命中 + fetch + reset 后应拿到 v2
+	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v2")
+}
+
+// TestV2_CacheReuse_FetchReset_Tag 验证缓存复用 + tag 场景:
+// 用 tag 作为 ref, fetch + reset --hard <tag> 更新.
+func TestV2_CacheReuse_FetchReset_Tag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "version.txt"), []byte("v1"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "v1")
+	// 打 tag
+	mustRunGit(t, srcRepo, "tag", "v1.0.0")
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// 第一次: clone --branch v1.0.0 (tag)
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := runGit("", "clone", "--depth=1", "--no-tags",
+		"-b", "v1.0.0", bareRepo, cacheDir); err != nil {
+		t.Fatalf("first clone with tag: %v", err)
+	}
+	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v1")
+
+	// 模拟缓存复用: fetch tag + reset --hard v1.0.0
+	// (tag 场景 reset target 直接用 tag 名, 不是 origin/<tag>)
+	if err := runGit(cacheDir, "fetch", "--depth=1", "origin", "refs/tags/v1.0.0"); err != nil {
+		t.Fatalf("fetch tag: %v", err)
+	}
+	if err := runGit(cacheDir, "reset", "--hard", "v1.0.0"); err != nil {
+		t.Fatalf("reset --hard tag: %v", err)
+	}
+	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v1")
+}
+
+// TestV2_CloneWithCommitSHA 验证 commit SHA 场景:
+// clone 默认分支 → fetch SHA → checkout SHA
+func TestV2_CloneWithCommitSHA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	saveGlobals(t)
+	globalTimeout = 0
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
+	mustWriteFile(t, filepath.Join(srcRepo, "docs", "file.txt"), []byte("content"))
+	mustRunGit(t, srcRepo, "add", ".")
+	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
+
+	// 获取 commit SHA
+	out, err := exec.Command("git", "-C", srcRepo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	sha := strings.TrimSpace(string(out))
+	if !isCommitSHA(sha) {
+		t.Fatalf("rev-parse output not a valid SHA: %q", sha)
+	}
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := runGit("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	// v2 SHA 流程: clone 默认分支 → fetch SHA → checkout SHA
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := runGit("", "clone", "--depth=1", "--no-tags", bareRepo, cacheDir); err != nil {
+		t.Fatalf("clone default branch: %v", err)
+	}
+	if err := runGit(cacheDir, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
+		t.Fatalf("fetch SHA: %v", err)
+	}
+	if err := runGit(cacheDir, "checkout", sha); err != nil {
+		t.Fatalf("checkout SHA: %v", err)
+	}
+
+	// 验证: docs/file.txt 存在且内容正确
+	assertFileContent(t, filepath.Join(cacheDir, "docs", "file.txt"), "content")
 }
 
 // ============================================================
