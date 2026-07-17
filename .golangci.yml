@@ -1,0 +1,95 @@
+run:
+  issues-exit-code: 1 # 发现问题时退出码，1 表示有 issue 就返回非零退出码（CI 据此判定失败）
+  tests: false # 是否 lint 测试文件（_test.go）
+
+linters-settings:
+  funlen:
+    lines: 120 # 函数最大行数限制，超过则报告 funlen 警告
+    statements: 80 # 函数最大语句数限制，超过则报告 funlen 警告
+  goconst:
+    min-len: 3 # 可提取为常量的字符串最小长度
+    min-occurrences: 3 # 字符串最少出现次数，达到才建议提取为常量
+  gocyclo:
+    min-complexity: 20 # 圈复杂度阈值，超过则报告 gocyclo 警告
+  # revive:
+  #   confidence: 0 # 置信度阈值，0 表示报告所有匹配的 issue（最严格）
+  lll:
+    line-length: 250 # 单行最大字符数，超过则报告 lll 警告
+  errcheck:
+    check-type-assertions: false # 是否检查类型断言的返回值（false 表示不检查 x.(T) 的 ok 返回值）
+  misspell:
+    locale: US # 拼写检查使用的区域，US 表示美式英语
+    ignore-words:
+      - cancelled # 忽略该词的拼写检查（美式为 canceled，但本项目允许 cancelled）
+  dogsled:
+    max-blank-identifiers: 3 # 允许的空白标识符 _ 的最大连续数量，超过则报告 dogsled 警告
+  goimports:
+    local-prefixes: git.woa.com/sgame_proj/sgame_oversea/dimension # 本地项目前缀，import 分组时该前缀的包单独成组
+
+linters:
+  # please, do not use `enable-all`: it's deprecated and will be removed soon.
+  # inverted configuration with `enable-all` and `disable` is not scalable during updates of golangci-lint
+  disable-all: true # 关闭所有 linter，仅启用下方 enable 列表中的（推荐做法，避免升级时引入未知 linter）
+  enable:
+    - bodyclose # 检查 http.Response.Body 是否被 Close，未关闭会导致连接泄漏
+    #- depguard # 依赖守卫：限制可导入的包白名单（当前未启用）
+    - dogsled # 检查连续空白标识符 _ 的数量是否过多
+    #- dupl # 代码重复检测（当前未启用）
+    #- errcheck # 检查函数返回值中的 error 是否被忽略
+    #- exhaustive # 检查 switch 是否穷举了 enum 所有值（当前未启用）
+    - funlen # 函数长度检测（行数、语句数）
+    #- gochecknoinits # 禁止使用 init() 函数（当前未启用）
+    - goconst # 检查可提取为常量的重复字符串
+    #- gocritic # 综合性代码风格检查，包含大量诊断规则
+    - gocyclo # 圈复杂度检测
+    - gofmt # 检查代码是否符合 gofmt 格式化标准
+    - goimports # 检查 import 分组与排序是否符合规范
+    # - revive # Go 风格检查（命名、注释等），golint 的替代品
+    #- gomnd # 魔法数字检测（当前未启用）
+    - goprintffuncname # 检查使用 fmt.Println 等的函数是否应命名为以 f 结尾（如 logf）
+    #- gosec # 安全检查（当前未启用，见 issues.exclude-rules 豁免 G404）
+    - gosimple # 简化代码建议（如可简化的写法）
+    - govet # go vet 检查（可疑代码结构，如 printf 参数不匹配）
+    - ineffassign # 检查赋值后从未使用的变量
+    #- interfacer # 建议使用更窄的接口类型（已废弃，当前未启用）
+    - lll # 行长度检测
+    - misspell # 拼写错误检测
+    - nakedret # 检查裸 return（函数末尾不带参数的 return）是否使用在过长函数中
+    #- noctx # 检查 HTTP 请求是否携带 context（当前未启用）
+    - nolintlint # 检查 //nolint 指令是否规范（是否有原因说明、是否多余）
+    - rowserrcheck # 检查 sql.Rows 是否调用了 Err() 检查迭代错误
+    #- scopelint # 作用域检查（已废弃，改用 exportloopref，当前未启用）
+    - staticcheck # 静态分析工具集（包含大量 bug 检测和代码改进建议）
+    #- stylecheck # 代码风格检查（替代 golint 的部分功能，更严格）
+    - typecheck # 类型检查（确保代码能通过编译器类型检查）
+    #- unconvert # 检查不必要的类型转换（如 int(x) 其中 x 已是 int）
+    #- unparam # 检查函数中未使用的参数（当前未启用）
+    - unused # 检查未使用的代码（变量、函数、类型等）
+    # - whitespace # 检查不必要的空行（如函数开头/结尾的空行）
+
+
+issues:
+  exclude-rules:
+    - linters: # 测试文件豁免 funlen 检查（测试函数通常较长）
+        - funlen
+      path: _test\.go
+    - linters: # testclient 测试客户端豁免 funlen 检查（测试用例函数通常较长）
+        - funlen
+      path: testclient/
+    - linters: # 豁免 gosec G404（弱随机数 math/rand 使用警告，游戏逻辑中常用）
+        - gosec
+      text: "G404:"
+    - linters: # 豁免 staticcheck SA1019（已弃用的 API 警告，迁移期暂保留旧 API）
+        - staticcheck
+      text: "SA1019:"
+    - linters:
+        - staticcheck
+      text: "SA9003:" # 关闭: 空分支检查(迁移过程中占位分支较多)
+    - path: _test\.go # 测试文件豁免 revive "context.Context 应为首个参数" 规则
+      text: "context.Context should be the first parameter of a function"
+      linters:
+        - revive
+    - path: _test\.go # 测试文件豁免 revive "导出函数返回非导出类型" 规则
+      text: "exported func.*returns unexported type.*which can be annoying to use"
+      linters:
+        - revive
