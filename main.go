@@ -14,6 +14,7 @@ import (
 
 	// 注册各拉取模式实现 (init() 中 Register)
 	_ "github.com/workmule/gitsparse/internal/puller/fullpull"
+	_ "github.com/workmule/gitsparse/internal/puller/snip"
 )
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x)

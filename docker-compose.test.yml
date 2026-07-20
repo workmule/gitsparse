@@ -1,0 +1,40 @@
+# =============================================================================
+# gitsparse 多 Git 版本测试编排
+# =============================================================================
+# 并行在多个 Git 版本容器中运行测试, 验证 snip 模式兼容性.
+#
+# 用法:
+#   docker-compose -f docker-compose.test.yml up --abort-on-container-exit
+#
+# 版本矩阵:
+#   git-220: alpine 3.9  → git 2.20.4 (不支持 sparse-checkout --cone)
+#   git-224: alpine 3.11 → git 2.24.4 (不支持)
+#   git-226: alpine 3.12 → git 2.26.3 (支持 cone)
+# =============================================================================
+
+version: "3.8"
+
+services:
+  git-220:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        ALPINE_VERSION: "3.9"
+    container_name: gitsparse-test-git220
+
+  git-224:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        ALPINE_VERSION: "3.11"
+    container_name: gitsparse-test-git224
+
+  git-226:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        ALPINE_VERSION: "3.12"
+    container_name: gitsparse-test-git226

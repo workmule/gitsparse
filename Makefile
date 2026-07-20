@@ -123,4 +123,28 @@ clean:
 clean-cache:
 	@rm -rf /tmp/gitsparse-cache
 
-.PHONY: run test test-short clean clean-cache
+# ============================================================================
+# Docker 多 Git 版本测试
+# =============================================================================
+
+# 在指定 alpine 版本 (对应不同 Git 版本) 的容器中运行测试
+# 用法: make test-docker ALPINE=3.9
+#       make test-docker-all  (跑全部 3 个版本)
+ALPINE ?= 3.12
+
+.PHONY: test-docker
+test-docker:
+	@echo ">> [docker] 构建并测试 (alpine $(ALPINE))"
+	@docker build --build-arg ALPINE_VERSION=$(ALPINE) -t gitsparse-test:alpine$(ALPINE) -f Dockerfile.test .
+
+.PHONY: test-docker-all
+test-docker-all:
+	@echo ">> [docker] 并行测试多个 Git 版本"
+	@docker-compose -f docker-compose.test.yml up --abort-on-container-exit
+
+.PHONY: test-docker-clean
+test-docker-clean:
+	@docker-compose -f docker-compose.test.yml down --rmi local 2>/dev/null || true
+	@docker rmi gitsparse-test:alpine3.9 gitsparse-test:alpine3.11 gitsparse-test:alpine3.12 2>/dev/null || true
+
+.PHONY: run test test-short clean clean-cache test-docker test-docker-all test-docker-clean

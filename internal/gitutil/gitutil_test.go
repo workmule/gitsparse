@@ -1187,3 +1187,58 @@ func TestRunRetry_GitCloneLocalThenSuccess(t *testing.T) {
 		t.Errorf("calls = %d, want 1 (should succeed first try)", calls)
 	}
 }
+
+// ============================================================
+// Git 版本解析与 sparse-checkout 兼容性检测
+// ============================================================
+
+// TestParseGitVersion 验证从 "git version x.y.z" 输出解析版本号.
+func TestParseGitVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    [3]int
+		wantErr bool
+	}{
+		{"standard", "git version 2.32.0\n", [3]int{2, 32, 0}, false},
+		{"with os info", "git version 2.25.1.windows.1\n", [3]int{2, 25, 1}, false},
+		{"old version", "git version 2.20.4\n", [3]int{2, 20, 4}, false},
+		{"no prefix", "2.32.0", [3]int{2, 32, 0}, false},
+		{"empty", "", [3]int{}, true},
+		{"garbage", "not a version string", [3]int{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseGitVersion(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseGitVersion(%q) err = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseGitVersion(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSupportsSparseCheckoutCone 验证 sparse-checkout --cone 兼容性判断.
+func TestSupportsSparseCheckoutCone(t *testing.T) {
+	tests := []struct {
+		name string
+		ver  [3]int
+		want bool
+	}{
+		{"2.25.0 (first supported)", [3]int{2, 25, 0}, true},
+		{"2.26.3", [3]int{2, 26, 3}, true},
+		{"2.32.0", [3]int{2, 32, 0}, true},
+		{"2.24.4 (too old)", [3]int{2, 24, 4}, false},
+		{"2.20.4 (too old)", [3]int{2, 20, 4}, false},
+		{"1.8.0 (very old)", [3]int{1, 8, 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SupportsSparseCheckoutCone(tt.ver); got != tt.want {
+				t.Errorf("SupportsSparseCheckoutCone(%v) = %v, want %v", tt.ver, got, tt.want)
+			}
+		})
+	}
+}

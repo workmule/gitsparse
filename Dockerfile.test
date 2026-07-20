@@ -1,0 +1,76 @@
+# =============================================================================
+# gitsparse 多 Git 版本测试 Dockerfile (多阶段构建)
+# =============================================================================
+# 问题: 旧版 alpine (3.9/3.11) 的 Go 版本太低 (1.11), 无法编译需要 Go 1.22 的代码.
+# 方案: 多阶段构建 —
+#   stage 1 (builder): golang:1.22-alpine 编译测试二进制 (go test -c)
+#   stage 2 (runner):  目标 alpine 版本, 安装旧 git, 运行编译好的测试二进制
+#
+# 这样可以在 git 2.20 (alpine 3.9) 等低版本环境中运行 Go 1.22 编译的测试.
+#
+# Build args:
+#   ALPINE_VERSION - runner 阶段的 alpine 版本, 决定容器内 Git 版本
+#     3.9  → git 2.20.4 (不支持 cone, < 2.25)
+#     3.11 → git 2.24.4 (不支持 cone, < 2.25)
+#     3.12 → git 2.26.3 (支持 cone, ≥ 2.25)
+#
+# 用法:
+#   docker build --build-arg ALPINE_VERSION=3.9 -t gitsparse-test:git220 -f Dockerfile.test .
+#   docker run --rm gitsparse-test:git220
+# =============================================================================
+
+# 全局 ARG: 必须在第一个 FROM 之前声明, 才能在 FROM 中使用
+ARG ALPINE_VERSION=3.12
+
+# -----------------------------------------------------------------------------
+# Stage 1: 编译测试二进制 (Go 1.22 环境)
+# -----------------------------------------------------------------------------
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+COPY go.mod ./
+COPY . .
+
+# 编译所有包的测试二进制 (-c 编译但不运行)
+# 每个包生成一个 .test 文件
+RUN go test -c -o /gitsparse-snip.test ./internal/puller/snip/ && \
+    go test -c -o /gitsparse-gitutil.test ./internal/gitutil/ && \
+    go test -c -o /gitsparse-fullpull.test ./internal/puller/fullpull/
+
+# -----------------------------------------------------------------------------
+# Stage 2: 运行测试 (目标 Git 版本环境)
+# -----------------------------------------------------------------------------
+FROM alpine:${ALPINE_VERSION}
+
+ARG ALPINE_VERSION
+LABEL gitsparse.alpine-version="${ALPINE_VERSION}"
+
+# 安装 git + ca-certificates (git https 需要)
+RUN apk add --no-cache git ca-certificates bash
+
+WORKDIR /app
+
+# 从 builder 拷贝测试二进制
+COPY --from=builder /gitsparse-snip.test /gitsparse-gitutil.test /gitsparse-fullpull.test ./
+
+# 运行测试: 检测 Git 版本, 低版本 (< 2.25) 设置 GITSPARSE_TEST_LOW_GIT=1 触发降级测试
+CMD ["sh", "-c", "\
+    echo '========================================' && \
+    echo \"Testing gitsparse with: $(git --version)\" && \
+    echo '========================================' && \
+    GIT_VER_STR=$(git --version | awk '{print $3}') && \
+    GIT_MAJOR=$(echo ${GIT_VER_STR} | cut -d. -f1) && \
+    GIT_MINOR=$(echo ${GIT_VER_STR} | cut -d. -f2) && \
+    if [ ${GIT_MAJOR} -lt 2 ] || { [ ${GIT_MAJOR} -eq 2 ] && [ ${GIT_MINOR} -lt 25 ]; }; then \
+        echo \"[LOW-GIT] git ${GIT_VER_STR} < 2.25, setting GITSPARSE_TEST_LOW_GIT=1\" && \
+        export GITSPARSE_TEST_LOW_GIT=1; \
+    else \
+        echo \"[OK-GIT] git ${GIT_VER_STR} >= 2.25, normal testing\"; \
+    fi && \
+    echo '=== snip tests ===' && \
+    ./gitsparse-snip.test -test.v -test.timeout 120s && \
+    echo '=== fullpull tests ===' && \
+    ./gitsparse-fullpull.test -test.v -test.timeout 120s && \
+    echo '=== gitutil tests ===' && \
+    ./gitsparse-gitutil.test -test.v -test.timeout 120s \
+"]

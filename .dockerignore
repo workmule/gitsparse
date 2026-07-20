@@ -1,0 +1,8 @@
+# 构建测试镜像时排除的文件, 加速 build context 传输
+output/
+*.bytes
+*.nav
+*.xml
+gitsparse
+gitsparse-*
+.cache/

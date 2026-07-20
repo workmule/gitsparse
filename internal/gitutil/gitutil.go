@@ -88,6 +88,58 @@ func CacheHash(repo, ref string) string {
 }
 
 // ============================================================================
+// Git 版本解析与兼容性检测
+// ============================================================================
+
+// ParseGitVersion 从 "git version x.y.z" 格式的字符串解析版本号.
+// 接受带或不带 "git version" 前缀的输入, 也兼容 "x.y.z.windows.1" 等后缀.
+// 返回 [major, minor, patch] 三元组.
+func ParseGitVersion(s string) ([3]int, error) {
+	var ver [3]int
+	// 去掉 "git version" 前缀
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "git version ")
+	s = strings.TrimSpace(s)
+
+	// 取第一段 x.y.z (忽略 .windows.1 等后缀)
+	parts := strings.SplitN(s, " ", 2)
+	core := parts[0]
+
+	nums := strings.Split(core, ".")
+	if len(nums) < 2 {
+		return ver, fmt.Errorf("invalid git version: %q", s)
+	}
+	for i := 0; i < 3; i++ {
+		if i >= len(nums) {
+			break
+		}
+		// 去掉可能的非数字后缀 (如 "2.32.0-rc1")
+		numStr := nums[i]
+		for j, c := range numStr {
+			if c < '0' || c > '9' {
+				numStr = numStr[:j]
+				break
+			}
+		}
+		if numStr == "" {
+			return ver, fmt.Errorf("invalid git version component: %q", nums[i])
+		}
+		n := 0
+		for _, c := range numStr {
+			n = n*10 + int(c-'0')
+		}
+		ver[i] = n
+	}
+	return ver, nil
+}
+
+// SupportsSparseCheckoutCone 判断给定 Git 版本是否支持 "sparse-checkout init --cone".
+// cone 模式在 Git 2.25.0 引入.
+func SupportsSparseCheckoutCone(ver [3]int) bool {
+	return ver[0] > 2 || (ver[0] == 2 && ver[1] >= 25)
+}
+
+// ============================================================================
 // Git 命令执行
 // ============================================================================
 
