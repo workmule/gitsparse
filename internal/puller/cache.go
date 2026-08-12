@@ -19,20 +19,21 @@ type Cache struct {
 	NoCache bool
 }
 
-// Hit 检测 workDir 是否已是有效的 git 工作区缓存 (含 .git 目录).
+// Hit 检测 workDir 是否已是有效的 git 工作区缓存.
+// 用 gitutil.IsValidRepo 验证 .git 可用 (非仅存在): 上次 fresh 中断会留下残缺 .git,
+// stat 通过但 git 命令报 "not a git repository", 必须重新 fresh.
 // NoCache=true 时永远返回 false.
 func (c Cache) Hit(workDir string) bool {
 	if c.NoCache {
 		gitutil.Logf("缓存已禁用 (-no-cache), 强制重新克隆")
 		return false
 	}
-	info, err := os.Stat(filepath.Join(workDir, ".git"))
-	if err == nil && info.IsDir() {
-		gitutil.Logf("缓存命中: %s", workDir)
-		return true
+	if !gitutil.IsValidRepo(workDir) {
+		gitutil.Logf("缓存未命中或已损坏, 克隆到: %s", workDir)
+		return false
 	}
-	gitutil.Logf("缓存未命中, 克隆到: %s", workDir)
-	return false
+	gitutil.Logf("缓存命中: %s", workDir)
+	return true
 }
 
 // CleanShallowLock 清理浅克隆 fetch 中断残留的 <workDir>/.git/shallow.lock.

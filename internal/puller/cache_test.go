@@ -2,6 +2,7 @@ package puller
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -57,23 +58,38 @@ func TestCache_Hit_NoGitDir(t *testing.T) {
 	}
 }
 
-// TestCache_Hit_GitDirExists 验证 .git 目录存在时返回 true.
+// TestCache_Hit_GitDirExists 验证有效 git 仓库 (git init 后) 时返回 true.
 func TestCache_Hit_GitDirExists(t *testing.T) {
 	dir := t.TempDir()
-	mustMkdirAll(t, filepath.Join(dir, ".git"))
+	if err := exec.Command("git", "-C", dir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
 	c := Cache{}
 	if !c.Hit(dir) {
-		t.Error("should hit when .git dir exists")
+		t.Error("should hit when dir is a valid git repo")
 	}
 }
 
-// TestCache_Hit_GitFileNotDir 验证 .git 是文件 (非目录) 时返回 false.
+// TestCache_Hit_CorruptedGitDir 验证 .git 目录存在但残缺 (无 HEAD/config) 时返回 false.
+// 复现: fresh 流程 git init 中断留下空 .git 目录, 下次 Hit 不应误判命中.
+func TestCache_Hit_CorruptedGitDir(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, filepath.Join(dir, ".git"))
+	c := Cache{}
+	if c.Hit(dir) {
+		t.Error("should miss when .git exists but is not a valid repo")
+	}
+}
+
+// TestCache_Hit_GitFileNotDir 验证 .git 是文件 (非目录, worktree 指向) 时不被误判.
+// 注: 当前实现依赖 git rev-parse 判定, .git 文件指向的 worktree 同样算有效仓库;
+// 此用例 .git 文件内容非真实 worktree 指向, 应返回 false.
 func TestCache_Hit_GitFileNotDir(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".git"), []byte("gitdir: ..."))
 	c := Cache{}
 	if c.Hit(dir) {
-		t.Error("should miss when .git is a file, not a dir")
+		t.Error("should miss when .git is a file pointing nowhere")
 	}
 }
 

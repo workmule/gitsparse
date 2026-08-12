@@ -22,7 +22,9 @@
 package puller
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,6 +56,8 @@ type Options struct {
 	// CacheDir 缓存根目录, 各模式可在此下按 CacheKey 创建子目录.
 	CacheDir string
 
+	// Mode 拉取模式名 ("full" / "snip" ...), 参与 CacheKey 以隔离不兼容的工作区.
+	Mode string
 	// NoCache true 时跳过缓存, 强制全新拉取.
 	NoCache bool
 
@@ -63,14 +67,49 @@ type Options struct {
 	// CacheTTL 缓存过期清理时间; 0 表示不清理.
 	CacheTTL time.Duration
 
-	// Runner 公共 git 命令执行器 (含 timeout / retries).
-	// nil 时各模式应自行 new 一个默认 Runner.
-	Runner *gitutil.Runner
+	// Timeout 单个 git 子命令的执行超时; 0 = 不限.
+	// 由 Run 时用 context.WithTimeout 派生子 ctx 控制.
+	Timeout time.Duration
+
+	// Retries 子步骤重试次数 (单条 git 命令失败后的重试, 由 Runner.RunRetry 处理).
+	Retries int
+
+	// FetchRetries 整体重试次数: FetchRepo 整体失败后清理 workDir 重跑的次数.
+	// 0=不整体重试; >0=失败后清理重跑.
+	// 与 Retries (子步骤重试) 相互独立:
+	// 子步骤重试覆盖瞬时网络抖动, 整体重试覆盖上下文损坏 (如 .git 残缺).
+	FetchRetries int
+
+	// TotalTimeout 整个 gitsparse 运行的总超时; 0 = 不限.
+	// 由 Run 时创建根 context.WithTimeout 控制, 所有子步骤共享.
+	TotalTimeout time.Duration
+
+	// Version / ListModes 是 CLI 早退标志 (非 Puller 参数), 由 main 在调用 Run 前检查.
+	// 放在 Options 里只为让 parseFlags 单一返回值覆盖所有 flag.
+	Version   bool
+	ListModes bool
 }
 
-// CacheKey 返回 repo+ref 的哈希, 用作缓存子目录名.
+// Validate 检查必填字段. 返回 nil 表示通过.
+// 早退标志 (Version/ListModes) 不在此检查: 命中时 main 应直接退出, 不走校验.
+func (o Options) Validate() error {
+	if o.Repo == "" {
+		return fmt.Errorf("-repo is required")
+	}
+	if o.Ref == "" {
+		return fmt.Errorf("-ref is required")
+	}
+	if len(o.Dirs) == 0 {
+		return fmt.Errorf("没有指定要拉取的目录 (-dirs)")
+	}
+	return nil
+}
+
+// CacheKey 返回 repo+ref+mode 的哈希, 用作缓存子目录名.
+// mode 参与 hash: full (全量检出) 与 snip (sparse-checkout) 的工作区互不兼容,
+// 共用同一缓存目录会导致 sparse 配置残留 / 文件缺失, 必须隔离.
 func (o Options) CacheKey() string {
-	return gitutil.CacheHash(o.Repo, o.Ref)
+	return gitutil.CacheHash(o.Repo, o.Ref, o.Mode)
 }
 
 // CachePath 返回完整缓存子目录路径 = CacheDir/CacheKey.
@@ -78,11 +117,8 @@ func (o Options) CachePath() string {
 	return filepath.Join(o.CacheDir, o.CacheKey())
 }
 
-// RunnerOrNew 返回 opts.Runner; 为 nil 时返回一个默认 Runner (无超时, 不重试).
+// RunnerOrNew 返回一个无状态 Runner. 保留兼容旧调用方; Runner 现已无状态.
 func (o Options) RunnerOrNew() *gitutil.Runner {
-	if o.Runner != nil {
-		return o.Runner
-	}
 	return &gitutil.Runner{}
 }
 
@@ -108,27 +144,38 @@ type Puller interface {
 	Desc() string
 
 	// FetchRepo 把仓库拉到 workDir.
+	// ctx 控制超时/取消; 调用方 (puller.Run) 已派生好子 ctx.
 	// cached 为 true 时 workDir 已有缓存, 应增量更新 (fetch+reset);
 	// cached 为 false 时应全新 clone.
-	FetchRepo(opts Options, workDir string, cached bool) error
+	FetchRepo(ctx context.Context, opts Options, workDir string, cached bool) error
 }
 
 // Run 执行完整的拉取流程 (缓存检测 → 拉取 → LFS → 拷贝 → 清理过期缓存).
 // 这是所有模式共享的公共编排, 各模式只需实现 FetchRepo.
+// ctx 由调用方 (main) 传入; TotalTimeout > 0 时 Run 内部派生根 ctx 控制总超时.
 func Run(p Puller, opts Options) error {
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if opts.TotalTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, opts.TotalTimeout)
+		defer cancel()
+	}
+
 	r := opts.RunnerOrNew()
+	// 用 Puller 的实际模式名参与缓存 key, 隔离 full/snip 等不兼容工作区.
+	// 覆盖 opts.Mode: 调用方可能未填, 以注册的实现为准.
+	opts.Mode = p.Name()
 	workDir := opts.CachePath()
 	cache := Cache{NoCache: opts.NoCache}
 	start := time.Now()
 
-	// Step 1: 缓存命中检测 + 拉取 (模式实现)
-	cached := cache.Hit(workDir)
-	if err := p.FetchRepo(opts, workDir, cached); err != nil {
+	// Step 1: 缓存检测 + FetchRepo (含整体重试)
+	if err := fetchWithRetry(ctx, p, opts, workDir, cache); err != nil {
 		return err
 	}
 
 	// Step 2: LFS pull (通用)
-	if err := runLFS(r, opts, workDir); err != nil {
+	if err := runLFS(ctx, r, opts, workDir); err != nil {
 		return err
 	}
 
@@ -144,8 +191,27 @@ func Run(p Puller, opts Options) error {
 	return nil
 }
 
+// fetchWithRetry 执行 FetchRepo, 支持整体重试.
+// 复用 Runner.RunRetry 作通用重试框架, 闭包内决定清理动作:
+//   - attempt=0: 首次尝试, 按 cache.Hit 结果走 fresh 或 cache 路径
+//   - attempt>0: 整体重试, 先 os.RemoveAll(workDir) 清理残留, 再走 fresh (Hit 必返回 false)
+//
+// 子步骤重试 (RunRetry) 由各 FetchRepo 内部处理, 覆盖瞬时网络抖动;
+// 整体重试在 FetchRepo 整体失败后清理 workDir 再重跑, 覆盖上下文损坏 (如 .git 残缺).
+func fetchWithRetry(ctx context.Context, p Puller, opts Options, workDir string, cache Cache) error {
+	r := opts.RunnerOrNew()
+	return r.RunRetry(ctx, opts.FetchRetries, func(ctx context.Context, attempt int) error {
+		if attempt > 0 {
+			gitutil.Logf("Step 1: 整体重试 %d/%d (清理 workDir 后重跑)", attempt, opts.FetchRetries)
+			os.RemoveAll(workDir)
+		}
+		cached := cache.Hit(workDir)
+		return p.FetchRepo(ctx, opts, workDir, cached)
+	}, "fetch")
+}
+
 // runLFS 通用 LFS 拉取: 若仓库含 LFS 文件且未禁用, 执行 git lfs pull --include <dirs>.
-func runLFS(r *gitutil.Runner, opts Options, workDir string) error {
+func runLFS(ctx context.Context, r *gitutil.Runner, opts Options, workDir string) error {
 	if opts.NoLFS {
 		gitutil.Logf("Step 2: 跳过 LFS pull (-no-lfs)")
 		return nil
@@ -157,9 +223,9 @@ func runLFS(r *gitutil.Runner, opts Options, workDir string) error {
 	lfsIncludeArg := strings.Join(lfsIncludes, ",")
 	gitutil.Logf("Step 2: git lfs pull --include=%s", lfsIncludeArg)
 	t0 := time.Now()
-	r.Run("", "lfs", "install")
-	if err := r.RunRetry(func() error {
-		return r.Run(workDir, "lfs", "pull", "--include", lfsIncludeArg)
+	r.RunWithTimeout(ctx, opts.Timeout, "", "lfs", "install")
+	if err := r.RunRetry(ctx, opts.Retries, func(ctx context.Context, attempt int) error {
+		return r.RunWithTimeout(ctx, opts.Timeout, workDir, "lfs", "pull", "--include", lfsIncludeArg)
 	}, "lfs pull"); err != nil {
 		return err
 	}

@@ -18,8 +18,8 @@ import (
 )
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x)
-// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.1.0'"
-const Version = "v2.1.0"
+// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.2.0'"
+const Version = "v2.2.20260812163822"
 
 // ============================================================================
 // 设计说明 (v2.1.0 重构: 模式化)
@@ -41,33 +41,21 @@ const Version = "v2.1.0"
 const cachePrefix = "gitsparse-cache"
 
 func main() {
-	repo := flag.String("repo", "", "Git repository URL")
-	ref := flag.String("ref", "", "Git ref: branch name, tag, or commit SHA")
-	dirs := flag.String("dirs", "", "Comma-separated directory paths to pull")
-	output := flag.String("output", ".", "Output directory")
-	timeout := flag.Duration("timeout", time.Minute, "Timeout per network operation (clone/fetch/lfs); 0 = no timeout")
-	retries := flag.Int("retries", 3, "Retry count for network operations")
-	cacheDir := flag.String("cache-dir", filepath.Join(os.TempDir(), cachePrefix), "Cache directory for cloned repos")
-	cacheTTL := flag.Duration("cache-ttl", 24*time.Hour, "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
-	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
-	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
-	mode := flag.String("mode", "full", "Pull mode (available: "+puller.AvailableModes()+")")
-	listModes := flag.Bool("list-modes", false, "List available pull modes and exit")
-	version := flag.Bool("version", false, "Print version and exit")
-	flag.Parse()
+	opts := parseFlags()
 
-	if *version {
+	// 打印版本号
+	if opts.Version {
 		fmt.Printf("gitsparse %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 		return
 	}
-
-	if *listModes {
+	// 打印模式列表
+	if opts.ListModes {
 		fmt.Printf("Available pull modes: %s\n", puller.AvailableModes())
 		return
 	}
-
-	if *repo == "" || *ref == "" || *dirs == "" {
-		fmt.Fprintln(os.Stderr, "[FAIL] -repo, -ref, -dirs are required")
+	// 检查参数合法性
+	if err := opts.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "[FAIL]", err)
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -79,40 +67,61 @@ func main() {
 	}
 	fmt.Printf("[git] %s", out)
 
-	dirList := gitutil.SplitAndTrim(*dirs, ",")
-	if len(dirList) == 0 {
-		gitutil.Failf("没有指定要拉取的目录")
-	}
-
-	// git 执行器: 超时 + 重试
-	runner := gitutil.Runner{Timeout: *timeout, Retries: *retries}
-
-	gitutil.Logf("配置: mode=%s, timeout=%s, retries=%d, cache=%s, ttl=%s",
-		*mode,
-		gitutil.DurStr(runner.Timeout), runner.Retries,
-		gitutil.BoolStr(*noCache, "off", *cacheDir), gitutil.DurStr(*cacheTTL))
+	gitutil.Logf("配置: mode=%s, timeout=%s, retries=%d, fetch-retries=%d, total-timeout=%s, cache=%s, ttl=%s",
+		opts.Mode,
+		gitutil.DurStr(opts.Timeout), opts.Retries, opts.FetchRetries, gitutil.DurStr(opts.TotalTimeout),
+		gitutil.BoolStr(opts.NoCache, "off", opts.CacheDir), gitutil.DurStr(opts.CacheTTL))
 
 	// 选择拉取模式
-	p, err := puller.Get(*mode)
+	p, err := puller.Get(opts.Mode)
 	if err != nil {
 		gitutil.Failf("%v", err)
-	}
-
-	// 构造 Options
-	opts := puller.Options{
-		Repo:     *repo,
-		Ref:      *ref,
-		Dirs:     dirList,
-		Output:   *output,
-		CacheDir: *cacheDir,
-		NoCache:  *noCache,
-		NoLFS:    *noLFS,
-		CacheTTL: *cacheTTL,
-		Runner:   &runner,
 	}
 
 	// 执行拉取 (公共流程: 缓存检测→拉取→LFS→拷贝→清理)
 	if err := puller.Run(p, opts); err != nil {
 		gitutil.Failf("%v", err)
+	}
+}
+
+// parseFlags 解析 CLI flag 并整理成 puller.Options.
+// -dirs (逗号分隔字符串) 在此拆成 []string 后填入 opts.Dirs.
+// 早退标志 (Version/ListModes) 也写入 opts, 由 main 检查.
+func parseFlags() puller.Options {
+	repo := flag.String("repo", "", "Git repository URL")
+	ref := flag.String("ref", "", "Git ref: branch name, tag, or commit SHA")
+	dirs := flag.String("dirs", "", "Comma-separated directory paths to pull")
+	output := flag.String("output", ".", "Output directory")
+	timeout := flag.Duration("timeout", time.Minute, "Timeout per network operation (clone/fetch/lfs); 0 = no timeout")
+	retries := flag.Int("retries", 3, "Retry count for network operations")
+	fetchRetries := flag.Int("fetch-retries", 1, "FetchRepo overall retry count (clean workDir and re-run on failure; 0 = no overall retry)")
+	totalTimeout := flag.Duration("total-timeout", 0, "Total timeout for entire gitsparse run (0 = no limit)")
+	cacheDir := flag.String("cache-dir", filepath.Join(os.TempDir(), cachePrefix), "Cache directory for cloned repos")
+	cacheTTL := flag.Duration("cache-ttl", 24*time.Hour, "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
+	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
+	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
+	mode := flag.String("mode", "full", "Pull mode (available: "+puller.AvailableModes()+")")
+	listModes := flag.Bool("list-modes", false, "List available pull modes and exit")
+	version := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
+
+	dirList := gitutil.SplitAndTrim(*dirs, ",")
+
+	return puller.Options{
+		Repo:         *repo,
+		Ref:          *ref,
+		Dirs:         dirList,
+		Output:       *output,
+		CacheDir:     *cacheDir,
+		Mode:         *mode,
+		NoCache:      *noCache,
+		NoLFS:        *noLFS,
+		CacheTTL:     *cacheTTL,
+		Timeout:      *timeout,
+		Retries:      *retries,
+		FetchRetries: *fetchRetries,
+		TotalTimeout: *totalTimeout,
+		Version:      *version,
+		ListModes:    *listModes,
 	}
 }

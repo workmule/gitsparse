@@ -24,8 +24,8 @@ GO        ?= go
 GOFMT     ?= gofmt
 GOLINT    ?= golangci-lint
 
-# 扫描时是否自动修复 (make check FIX=true 会跑 gofmt -w / goimports -w)
-FIX ?= false
+# 扫描时是否自动修复 (默认 true: gofmt -w / goimports -w)
+FIX ?= true
 
 # 构建产物
 BIN ?= gitsparse
@@ -123,6 +123,19 @@ clean:
 clean-cache:
 	@rm -rf /tmp/gitsparse-cache
 
+# 安装到 $GOBIN (或 $GOPATH/bin), 之后可直接 gitsparse ... 调用
+# 构建时把 main.go 的版本号最后一段替换为构建时刻 (YYYYMMDDHHMMSS), 便于区分构建版本
+.PHONY: install
+install:
+	@$(eval BUILD_VER := $(shell date +%Y%m%d%H%M%S))
+	@sed -i -E 's/^(const Version = "v[0-9]+\.[0-9]+\.)([0-9]+)"/\1$(BUILD_VER)"/' main.go
+	@echo ">> [install] go install (版本号末位改为 $(BUILD_VER))"
+	@$(GO) install .
+
+
+.PHONY: all
+all: build
+
 # ============================================================================
 # Docker 多 Git 版本测试
 # =============================================================================
@@ -147,4 +160,4 @@ test-docker-clean:
 	@docker-compose -f docker-compose.test.yml down --rmi local 2>/dev/null || true
 	@docker rmi gitsparse-test:alpine3.9 gitsparse-test:alpine3.11 gitsparse-test:alpine3.12 2>/dev/null || true
 
-.PHONY: run test test-short clean clean-cache test-docker test-docker-all test-docker-clean
+.PHONY: run test test-short clean clean-cache install test-docker test-docker-all test-docker-clean

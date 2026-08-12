@@ -14,6 +14,7 @@
 package snip
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,15 +46,15 @@ func (p *Puller) Desc() string {
 
 // FetchRepo 把仓库拉到 workDir.
 // cached=true 走增量更新 (sparse reapply+fetch+reset); false 走全新 sparse fetch.
-func (p *Puller) FetchRepo(opts puller.Options, workDir string, cached bool) error {
+func (p *Puller) FetchRepo(ctx context.Context, opts puller.Options, workDir string, cached bool) error {
 	// Git 版本检测: snip 模式需要 sparse-checkout --cone (Git 2.25+)
 	if err := p.checkGitVersion(); err != nil {
 		return err
 	}
 	if !cached {
-		return p.freshSparseFetch(opts, workDir)
+		return p.freshSparseFetch(ctx, opts, workDir)
 	}
-	return p.cacheSparseUpdate(opts, workDir)
+	return p.cacheSparseUpdate(ctx, opts, workDir)
 }
 
 // checkGitVersion 检测系统 Git 版本是否支持 sparse-checkout --cone (Git 2.25+).
@@ -75,7 +76,7 @@ func (p *Puller) checkGitVersion() error {
 }
 
 // freshSparseFetch 全新 sparse 拉取.
-func (p *Puller) freshSparseFetch(opts puller.Options, workDir string) error {
+func (p *Puller) freshSparseFetch(ctx context.Context, opts puller.Options, workDir string) error {
 	r := opts.RunnerOrNew()
 	gitutil.Logf("Step 1: git init + sparse-checkout (cone)")
 	t0 := time.Now()
@@ -87,32 +88,36 @@ func (p *Puller) freshSparseFetch(opts puller.Options, workDir string) error {
 	}
 
 	// 1. init + remote
-	if err := r.Run(workDir, "init"); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "init"); err != nil {
 		return err
 	}
-	if err := r.Run(workDir, "remote", "add", "origin", opts.Repo); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "remote", "add", "origin", opts.Repo); err != nil {
 		return err
 	}
 
 	// 2. sparse-checkout init --cone + set <dirs>
-	if err := r.Run(workDir, "sparse-checkout", "init", "--cone"); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "sparse-checkout", "init", "--cone"); err != nil {
 		return err
 	}
 	setArgs := append([]string{"sparse-checkout", "set"}, opts.Dirs...)
-	if err := r.Run(workDir, setArgs...); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
 		return err
 	}
 
 	// 3. fetch --depth=1
-	if err := r.RunRetry(func() error {
-		return r.Run(workDir, "fetch", "--depth=1", "--no-tags",
+	// attempt 0=首次, 1=第一次重试(直接重试, 假设瞬时抖动), >=2=第二次起清理残留 shallow.lock.
+	if err := r.RunRetry(ctx, opts.Retries, func(ctx context.Context, attempt int) error {
+		if attempt >= 2 {
+			puller.Cache{}.CleanShallowLock(workDir)
+		}
+		return r.RunWithTimeout(ctx, opts.Timeout, workDir, "fetch", "--depth=1", "--no-tags",
 			"--progress", "origin", opts.Ref)
 	}, "fetch"); err != nil {
 		return err
 	}
 
 	// 4. checkout FETCH_HEAD
-	if err := r.Run(workDir, "checkout", "FETCH_HEAD"); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "checkout", "FETCH_HEAD"); err != nil {
 		return err
 	}
 
@@ -121,7 +126,7 @@ func (p *Puller) freshSparseFetch(opts puller.Options, workDir string) error {
 }
 
 // cacheSparseUpdate 缓存复用: reapply sparse + fetch + reset.
-func (p *Puller) cacheSparseUpdate(opts puller.Options, workDir string) error {
+func (p *Puller) cacheSparseUpdate(ctx context.Context, opts puller.Options, workDir string) error {
 	r := opts.RunnerOrNew()
 	gitutil.Logf("Step 1: 缓存复用, sparse-checkout 更新")
 	t0 := time.Now()
@@ -131,13 +136,16 @@ func (p *Puller) cacheSparseUpdate(opts puller.Options, workDir string) error {
 
 	// sparse-checkout set (dirs 可能变化)
 	setArgs := append([]string{"sparse-checkout", "set"}, opts.Dirs...)
-	if err := r.Run(workDir, setArgs...); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
 		return err
 	}
 
-	// fetch (失败不致命)
-	if err := r.RunRetry(func() error {
-		return r.Run(workDir, "fetch", "--depth=1", "--no-tags",
+	// fetch (失败不致命). attempt>=2 时清理残留 shallow.lock (第二次重试起).
+	if err := r.RunRetry(ctx, opts.Retries, func(ctx context.Context, attempt int) error {
+		if attempt >= 2 {
+			cache.CleanShallowLock(workDir)
+		}
+		return r.RunWithTimeout(ctx, opts.Timeout, workDir, "fetch", "--depth=1", "--no-tags",
 			"--progress", "origin", opts.Ref)
 	}, "fetch"); err != nil {
 		gitutil.Logf("  fetch 失败, 继续使用缓存旧版本: %v", err)
@@ -146,7 +154,7 @@ func (p *Puller) cacheSparseUpdate(opts puller.Options, workDir string) error {
 	}
 
 	// reset --hard FETCH_HEAD
-	if err := r.Run(workDir, "reset", "--hard", "FETCH_HEAD"); err != nil {
+	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "reset", "--hard", "FETCH_HEAD"); err != nil {
 		gitutil.Logf("  reset 失败, 清除缓存目录: %s", workDir)
 		os.RemoveAll(workDir)
 		return err

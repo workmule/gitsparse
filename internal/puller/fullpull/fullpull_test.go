@@ -1,6 +1,7 @@
 package fullpull
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +58,7 @@ func initTempRepo(t *testing.T) string {
 
 func mustRunGit(t *testing.T, r *gitutil.Runner, dir string, args ...string) {
 	t.Helper()
-	if err := r.Run(dir, args...); err != nil {
+	if err := r.Run(context.Background(), dir, args...); err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 }
@@ -115,7 +116,7 @@ func TestPull_FullFlow_Branch(t *testing.T) {
 	mustRunGit(t, r, srcRepo, "commit", "-m", "add docs and src")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -131,7 +132,6 @@ func TestPull_FullFlow_Branch(t *testing.T) {
 		CacheDir: cacheDir,
 		NoCache:  true,
 		NoLFS:    true,
-		Runner:   r,
 	})
 	if err != nil {
 		t.Fatalf("Pull failed: %v", err)
@@ -142,7 +142,8 @@ func TestPull_FullFlow_Branch(t *testing.T) {
 	assertFileContent(t, filepath.Join(outputDir, "docs", "data.json"), `{"id":1}`)
 
 	// 验证缓存目录已建立 (.git 存在)
-	if _, err := os.Stat(filepath.Join(cacheDir, gitutil.CacheHash(bareRepo, "master"), ".git")); err != nil {
+	cacheKey := gitutil.CacheHash(bareRepo, "master", "full")
+	if _, err := os.Stat(filepath.Join(cacheDir, cacheKey, ".git")); err != nil {
 		t.Errorf("cache .git not found: %v", err)
 	}
 }
@@ -161,7 +162,7 @@ func TestPull_CacheReuse(t *testing.T) {
 	mustRunGit(t, r, srcRepo, "commit", "-m", "v1")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -172,7 +173,7 @@ func TestPull_CacheReuse(t *testing.T) {
 	out1 := t.TempDir()
 	if err := puller.Run(p, puller.Options{
 		Repo: bareRepo, Ref: "master", Dirs: []string{"docs"},
-		Output: out1, CacheDir: cacheDir, NoLFS: true, Runner: r,
+		Output: out1, CacheDir: cacheDir, NoLFS: true,
 	}); err != nil {
 		t.Fatalf("first Pull: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestPull_CacheReuse(t *testing.T) {
 	mustWriteFile(t, filepath.Join(srcRepo, "docs", "version.txt"), []byte("v2"))
 	mustRunGit(t, r, srcRepo, "add", ".")
 	mustRunGit(t, r, srcRepo, "commit", "-m", "v2")
-	if err := r.Run(srcRepo, "push", bareRepo, "master"); err != nil {
+	if err := r.Run(context.Background(), srcRepo, "push", bareRepo, "master"); err != nil {
 		t.Fatalf("push v2: %v", err)
 	}
 
@@ -190,7 +191,7 @@ func TestPull_CacheReuse(t *testing.T) {
 	out2 := t.TempDir()
 	if err := puller.Run(p, puller.Options{
 		Repo: bareRepo, Ref: "master", Dirs: []string{"docs"},
-		Output: out2, CacheDir: cacheDir, NoLFS: true, Runner: r,
+		Output: out2, CacheDir: cacheDir, NoLFS: true,
 	}); err != nil {
 		t.Fatalf("second Pull (cache reuse): %v", err)
 	}
@@ -217,7 +218,7 @@ func TestPull_CommitSHA(t *testing.T) {
 	sha := strings.TrimSpace(string(out))
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -226,7 +227,7 @@ func TestPull_CommitSHA(t *testing.T) {
 	p := &Puller{}
 	if err := puller.Run(p, puller.Options{
 		Repo: bareRepo, Ref: sha, Dirs: []string{"docs"},
-		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true, Runner: r,
+		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true,
 	}); err != nil {
 		t.Fatalf("Pull SHA: %v", err)
 	}
@@ -242,7 +243,7 @@ func TestPull_MissingDir(t *testing.T) {
 
 	srcRepo := initTempRepo(t)
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -251,7 +252,7 @@ func TestPull_MissingDir(t *testing.T) {
 	p := &Puller{}
 	err := puller.Run(p, puller.Options{
 		Repo: bareRepo, Ref: "master", Dirs: []string{"nonexistent"},
-		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true, Runner: r,
+		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true,
 	})
 	if err == nil {
 		t.Fatal("expected error for missing dir, got nil")

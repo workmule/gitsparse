@@ -98,15 +98,15 @@ func initTempRepo(t *testing.T) string {
 func mustRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	r := &Runner{}
-	if err := r.Run(dir, args...); err != nil {
+	if err := r.Run(context.Background(), dir, args...); err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 }
 
 // saveRunner returns a new Runner with the given timeout/retries for test scope.
-func saveRunner(t *testing.T, timeout time.Duration, retries int) *Runner {
+func saveRunner(t *testing.T, _ time.Duration, _ int) *Runner {
 	t.Helper()
-	return &Runner{Timeout: timeout, Retries: retries}
+	return &Runner{}
 }
 
 // ============================================================
@@ -538,7 +538,7 @@ func TestRunRetry_SuccessFirstTry(t *testing.T) {
 	r := saveRunner(t, 0, 3)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 3, func(ctx context.Context, attempt int) error {
 		calls++
 		return nil
 	}, "test")
@@ -554,7 +554,7 @@ func TestRunRetry_AllFail(t *testing.T) {
 	r := saveRunner(t, 0, 1)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		return errors.New("network error")
 	}, "test")
@@ -570,7 +570,7 @@ func TestRunRetry_SuccessOnThirdTry(t *testing.T) {
 	r := saveRunner(t, 0, 3)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 3, func(ctx context.Context, attempt int) error {
 		calls++
 		if calls < 3 {
 			return errors.New("fail")
@@ -589,7 +589,7 @@ func TestRunRetry_DeadlineExceeded(t *testing.T) {
 	r := saveRunner(t, 0, 1)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		return context.DeadlineExceeded
 	}, "test")
@@ -608,7 +608,7 @@ func TestRunRetry_ZeroRetries(t *testing.T) {
 	r := saveRunner(t, 0, 0)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 0, func(ctx context.Context, attempt int) error {
 		calls++
 		return errors.New("fail")
 	}, "test")
@@ -624,7 +624,7 @@ func TestRunRetry_NegativeRetries(t *testing.T) {
 	r := saveRunner(t, 0, -1)
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), -1, func(ctx context.Context, attempt int) error {
 		calls++
 		return errors.New("fail")
 	}, "test")
@@ -644,10 +644,10 @@ func TestRun_BasicOperation(t *testing.T) {
 	r := saveRunner(t, 0, 0)
 
 	dir := t.TempDir()
-	if err := r.Run(dir, "init"); err != nil {
+	if err := r.Run(context.Background(), dir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	if err := r.Run(dir, "status"); err != nil {
+	if err := r.Run(context.Background(), dir, "status"); err != nil {
 		t.Fatalf("git status: %v", err)
 	}
 }
@@ -655,7 +655,7 @@ func TestRun_BasicOperation(t *testing.T) {
 func TestRun_InvalidCommand(t *testing.T) {
 	r := saveRunner(t, 0, 0)
 
-	err := r.Run("", "not-a-real-git-subcommand")
+	err := r.Run(context.Background(), "", "not-a-real-git-subcommand")
 	if err == nil {
 		t.Fatal("expected error for invalid git command")
 	}
@@ -664,7 +664,7 @@ func TestRun_InvalidCommand(t *testing.T) {
 func TestRun_NonExistentDir(t *testing.T) {
 	r := saveRunner(t, 0, 0)
 
-	err := r.Run(filepath.Join(t.TempDir(), "does-not-exist"), "status")
+	err := r.Run(context.Background(), filepath.Join(t.TempDir(), "does-not-exist"), "status")
 	if err == nil {
 		t.Fatal("expected error for non-existent working dir")
 	}
@@ -686,7 +686,9 @@ func TestRun_TimeoutWithSlowServer(t *testing.T) {
 	target := filepath.Join(tmpDir, "clone")
 
 	start := time.Now()
-	err := r.Run("", "clone", "--depth=1", repoURL, target)
+	toCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := r.Run(toCtx, "", "clone", "--depth=1", repoURL, target)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -710,10 +712,13 @@ func TestRunRetry_TimeoutWithSlowServer(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	start := time.Now()
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		target := filepath.Join(tmpDir, fmt.Sprintf("clone%d", calls))
-		return r.Run("", "clone", "--depth=1", repoURL, target)
+		// 每次 clone 用 300ms 超时 (会超时, 模拟慢服务器)
+		toCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		return r.Run(toCtx, "", "clone", "--depth=1", repoURL, target)
 	}, "clone")
 	elapsed := time.Since(start)
 
@@ -733,7 +738,7 @@ func TestRun_TimeoutZero_NoTimeout(t *testing.T) {
 	r := saveRunner(t, 0, 0)
 
 	dir := t.TempDir()
-	if err := r.Run(dir, "init"); err != nil {
+	if err := r.Run(context.Background(), dir, "init"); err != nil {
 		t.Fatalf("git init failed with no timeout: %v", err)
 	}
 }
@@ -755,7 +760,7 @@ func TestCloneRetryAfterStaleDir(t *testing.T) {
 	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -766,10 +771,10 @@ func TestCloneRetryAfterStaleDir(t *testing.T) {
 	mustWriteFile(t, filepath.Join(target, "README.md"), []byte("partial"))
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		PrepareCloneTarget(target)
-		return r.Run("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+		return r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
 	}, "clone")
 
 	if err != nil {
@@ -785,7 +790,7 @@ func TestCloneRetryWithRealStaleDirSimulatingTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network test in short mode")
 	}
-	r := &Runner{Timeout: 300 * time.Millisecond, Retries: 1}
+	r := &Runner{}
 
 	srcRepo := initTempRepo(t)
 	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
@@ -793,7 +798,7 @@ func TestCloneRetryWithRealStaleDirSimulatingTimeout(t *testing.T) {
 	mustRunGit(t, srcRepo, "add", ".")
 	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -802,22 +807,25 @@ func TestCloneRetryWithRealStaleDirSimulatingTimeout(t *testing.T) {
 	dstDir := t.TempDir()
 	target := filepath.Join(dstDir, "cache")
 
-	attempt := 0
-	err := r.RunRetry(func() error {
-		attempt++
+	calls := 0
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
+		calls++
 		PrepareCloneTarget(target)
-		if attempt == 1 {
-			return r.Run("", "clone", "--depth=1", slowURL, target)
+		if calls == 1 {
+			// 第一次用 300ms 超时 (会超时), 模拟网络中断残留目录
+			toCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			return r.Run(toCtx, "", "clone", "--depth=1", slowURL, target)
 		}
-		r.Timeout = 0
-		return r.Run("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+		// 第二次不限超时, 从本地 bareRepo clone 成功
+		return r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
 	}, "clone")
 
 	if err != nil {
 		t.Fatalf("retry should succeed after stale dir cleanup: %v", err)
 	}
-	if attempt != 2 {
-		t.Errorf("attempts = %d, want 2", attempt)
+	if calls != 2 {
+		t.Errorf("attempts = %d, want 2", calls)
 	}
 	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
 }
@@ -835,7 +843,7 @@ func TestCloneRetryAfterStaleDir_WithGitSubtree(t *testing.T) {
 	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -855,10 +863,10 @@ func TestCloneRetryAfterStaleDir_WithGitSubtree(t *testing.T) {
 	}
 
 	calls := 0
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		PrepareCloneTarget(target)
-		return r.Run("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+		return r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
 	}, "clone")
 
 	if err != nil {
@@ -874,7 +882,7 @@ func TestCloneRetryMultipleTimeoutsThenSuccess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network test in short mode")
 	}
-	r := &Runner{Timeout: 200 * time.Millisecond, Retries: 3}
+	r := &Runner{}
 
 	srcRepo := initTempRepo(t)
 	mustMkdirAll(t, filepath.Join(srcRepo, "docs"))
@@ -882,7 +890,7 @@ func TestCloneRetryMultipleTimeoutsThenSuccess(t *testing.T) {
 	mustRunGit(t, srcRepo, "add", ".")
 	mustRunGit(t, srcRepo, "commit", "-m", "add docs")
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -890,22 +898,25 @@ func TestCloneRetryMultipleTimeoutsThenSuccess(t *testing.T) {
 	dstDir := t.TempDir()
 	target := filepath.Join(dstDir, "cache")
 
-	attempt := 0
-	err := r.RunRetry(func() error {
-		attempt++
+	calls := 0
+	err := r.RunRetry(context.Background(), 3, func(ctx context.Context, attempt int) error {
+		calls++
 		PrepareCloneTarget(target)
-		if attempt < 4 {
-			return r.Run("", "clone", "--depth=1", slowURL, target)
+		if calls < 4 {
+			// 前 3 次用 200ms 超时 (会超时), 模拟网络中断
+			toCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			return r.Run(toCtx, "", "clone", "--depth=1", slowURL, target)
 		}
-		r.Timeout = 0
-		return r.Run("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+		// 第 4 次不限超时, 从本地 bareRepo clone 成功
+		return r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
 	}, "clone")
 
 	if err != nil {
 		t.Fatalf("should succeed on 4th attempt after 3 cleanups: %v", err)
 	}
-	if attempt != 4 {
-		t.Errorf("attempts = %d, want 4", attempt)
+	if calls != 4 {
+		t.Errorf("attempts = %d, want 4", calls)
 	}
 	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "ok")
 }
@@ -929,7 +940,7 @@ func TestCloneRetryAfterStaleDir_SHAFlow(t *testing.T) {
 	sha := strings.TrimSpace(string(out))
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -940,10 +951,10 @@ func TestCloneRetryAfterStaleDir_SHAFlow(t *testing.T) {
 	mustWriteFile(t, filepath.Join(target, "stale.txt"), []byte("stale"))
 
 	calls := 0
-	err = r.RunRetry(func() error {
+	err = r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		PrepareCloneTarget(target)
-		return r.Run("", "clone", "--depth=1", "--no-tags", bareRepo, target)
+		return r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", bareRepo, target)
 	}, "clone")
 	if err != nil {
 		t.Fatalf("SHA clone should succeed after cleanup: %v", err)
@@ -952,10 +963,10 @@ func TestCloneRetryAfterStaleDir_SHAFlow(t *testing.T) {
 		t.Errorf("calls = %d, want 1", calls)
 	}
 
-	if err := r.Run(target, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
+	if err := r.Run(context.Background(), target, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
 		t.Fatalf("fetch SHA: %v", err)
 	}
-	if err := r.Run(target, "checkout", sha); err != nil {
+	if err := r.Run(context.Background(), target, "checkout", sha); err != nil {
 		t.Fatalf("checkout SHA: %v", err)
 	}
 	assertFileContent(t, filepath.Join(target, "docs", "file.txt"), "sha-content")
@@ -972,7 +983,7 @@ func TestCloneFailsWithoutPrepareCloneTarget(t *testing.T) {
 
 	srcRepo := initTempRepo(t)
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
@@ -980,7 +991,7 @@ func TestCloneFailsWithoutPrepareCloneTarget(t *testing.T) {
 	mustMkdirAll(t, filepath.Join(target, ".git"))
 	mustWriteFile(t, filepath.Join(target, ".git", "config"), []byte("stale"))
 
-	err := r.Run("", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
+	err := r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", "-b", "master", bareRepo, target)
 	if err == nil {
 		t.Fatal("expected clone to FAIL when target dir exists and is non-empty " +
 			"(this test verifies the bug exists without PrepareCloneTarget)")
@@ -1012,12 +1023,12 @@ func TestFullClone_Checkout_CopyDir(t *testing.T) {
 	mustRunGit(t, srcRepo, "commit", "-m", "add docs and src")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := r.Run("", "clone", "--depth=1", "--no-tags",
+	if err := r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags",
 		"-b", "master", bareRepo, cacheDir); err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -1058,12 +1069,12 @@ func TestCacheReuse_FetchReset(t *testing.T) {
 	mustRunGit(t, srcRepo, "commit", "-m", "v1")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := r.Run("", "clone", "--depth=1", "--no-tags",
+	if err := r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags",
 		"-b", "master", bareRepo, cacheDir); err != nil {
 		t.Fatalf("first clone: %v", err)
 	}
@@ -1072,14 +1083,14 @@ func TestCacheReuse_FetchReset(t *testing.T) {
 	mustWriteFile(t, filepath.Join(srcRepo, "docs", "version.txt"), []byte("v2"))
 	mustRunGit(t, srcRepo, "add", ".")
 	mustRunGit(t, srcRepo, "commit", "-m", "v2")
-	if err := r.Run(srcRepo, "push", bareRepo, "master"); err != nil {
+	if err := r.Run(context.Background(), srcRepo, "push", bareRepo, "master"); err != nil {
 		t.Fatalf("push v2: %v", err)
 	}
 
-	if err := r.Run(cacheDir, "fetch", "--depth=1", "--no-tags", "origin", "master"); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "fetch", "--depth=1", "--no-tags", "origin", "master"); err != nil {
 		t.Fatalf("fetch on cache hit: %v", err)
 	}
-	if err := r.Run(cacheDir, "reset", "--hard", "origin/master"); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "reset", "--hard", "origin/master"); err != nil {
 		t.Fatalf("reset --hard after fetch: %v", err)
 	}
 
@@ -1100,21 +1111,21 @@ func TestCacheReuse_FetchReset_Tag(t *testing.T) {
 	mustRunGit(t, srcRepo, "tag", "v1.0.0")
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := r.Run("", "clone", "--depth=1", "--no-tags",
+	if err := r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags",
 		"-b", "v1.0.0", bareRepo, cacheDir); err != nil {
 		t.Fatalf("first clone with tag: %v", err)
 	}
 	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v1")
 
-	if err := r.Run(cacheDir, "fetch", "--depth=1", "origin", "refs/tags/v1.0.0"); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "fetch", "--depth=1", "origin", "refs/tags/v1.0.0"); err != nil {
 		t.Fatalf("fetch tag: %v", err)
 	}
-	if err := r.Run(cacheDir, "reset", "--hard", "v1.0.0"); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "reset", "--hard", "v1.0.0"); err != nil {
 		t.Fatalf("reset --hard tag: %v", err)
 	}
 	assertFileContent(t, filepath.Join(cacheDir, "docs", "version.txt"), "v1")
@@ -1142,18 +1153,18 @@ func TestCloneWithCommitSHA(t *testing.T) {
 	}
 
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := r.Run("", "clone", "--depth=1", "--no-tags", bareRepo, cacheDir); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--depth=1", "--no-tags", bareRepo, cacheDir); err != nil {
 		t.Fatalf("clone default branch: %v", err)
 	}
-	if err := r.Run(cacheDir, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "fetch", "--depth=1", "--no-tags", "origin", sha); err != nil {
 		t.Fatalf("fetch SHA: %v", err)
 	}
-	if err := r.Run(cacheDir, "checkout", sha); err != nil {
+	if err := r.Run(context.Background(), cacheDir, "checkout", sha); err != nil {
 		t.Fatalf("checkout SHA: %v", err)
 	}
 
@@ -1168,16 +1179,16 @@ func TestRunRetry_GitCloneLocalThenSuccess(t *testing.T) {
 
 	srcRepo := initTempRepo(t)
 	bareRepo := filepath.Join(t.TempDir(), "bare.git")
-	if err := r.Run("", "clone", "--bare", srcRepo, bareRepo); err != nil {
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
 		t.Fatalf("clone --bare: %v", err)
 	}
 
 	calls := 0
 	dstDir := t.TempDir()
-	err := r.RunRetry(func() error {
+	err := r.RunRetry(context.Background(), 1, func(ctx context.Context, attempt int) error {
 		calls++
 		target := filepath.Join(dstDir, fmt.Sprintf("clone%d", calls))
-		return r.Run("", "clone", bareRepo, target)
+		return r.Run(context.Background(), "", "clone", bareRepo, target)
 	}, "clone")
 
 	if err != nil {

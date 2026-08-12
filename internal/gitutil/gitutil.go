@@ -81,10 +81,18 @@ func IsCommitSHA(ref string) bool {
 	return true
 }
 
-// CacheHash 根据 repo + ref 生成 12 位 sha256 哈希作为缓存目录名.
-func CacheHash(repo, ref string) string {
-	h := sha256.Sum256([]byte(repo + "|" + ref))
-	return hex.EncodeToString(h[:])[:12]
+// CacheHash 根据 repo + ref (+ 可选 extra) 生成 12 位 sha256 哈希作为缓存目录名.
+// extra 用于隔离不兼容的缓存变体 (如 puller mode: full vs snip).
+func CacheHash(repo, ref string, extra ...string) string {
+	h := sha256.New()
+	h.Write([]byte(repo))
+	h.Write([]byte("|"))
+	h.Write([]byte(ref))
+	for _, e := range extra {
+		h.Write([]byte("|"))
+		h.Write([]byte(e))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // ============================================================================
@@ -139,33 +147,32 @@ func SupportsSparseCheckoutCone(ver [3]int) bool {
 	return ver[0] > 2 || (ver[0] == 2 && ver[1] >= 25)
 }
 
+// IsValidRepo 检测 dir 是否为可用的 git 仓库.
+// 用 `git rev-parse --git-dir` 判定, 比 stat .git 更权威:
+// 上次 fresh 流程中断 (如 init 成功但 remote/fetch 失败) 会留下残缺 .git,
+// stat .git 通过但 git 命令仍报 "not a git repository".
+func IsValidRepo(dir string) bool {
+	err := exec.Command("git", "-C", dir, "rev-parse", "--git-dir").Run()
+	return err == nil
+}
+
 // ============================================================================
 // Git 命令执行
 // ============================================================================
 
-// Runner 封装 git 命令执行参数 (timeout / retries), 替代旧版全局变量.
-// 所有拉取模式应持有同一个 Runner 实例, 保证 timeout / retries 一致.
-type Runner struct {
-	Timeout time.Duration
-	Retries int
-}
+// Runner 无状态的 git 命令执行器. 超时由每次 Run/RunRetry 调用时传 ctx 控制,
+// 重试次数由 RunRetry 的 retries 参数控制. Runner 本身不再持任何配置.
+type Runner struct{}
 
 // Run 执行 git 命令, dir 非空时设置工作目录, 打印完整命令行.
-// Timeout > 0 时对子进程施加超时.
-func (r *Runner) Run(dir string, args ...string) error {
+// ctx 控制超时/取消: ctx 取消时子进程被杀.
+func (r *Runner) Run(ctx context.Context, dir string, args ...string) error {
 	display := "git"
 	if dir != "" {
 		display += " -C " + dir
 	}
 	display += " " + strings.Join(args, " ")
 	fmt.Fprintf(os.Stderr, "  $ %s\n", display)
-
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if r.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
-		defer cancel()
-	}
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
@@ -176,21 +183,35 @@ func (r *Runner) Run(dir string, args ...string) error {
 	return cmd.Run()
 }
 
+// RunWithTimeout 是 Run 的便捷封装: timeout > 0 时派生带超时的子 ctx.
+// 用于单命令超时控制 (替代旧 Runner.Timeout 字段).
+func (r *Runner) RunWithTimeout(ctx context.Context, timeout time.Duration, dir string, args ...string) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return r.Run(ctx, dir, args...)
+}
+
 // RunRetry 包装网络操作, 支持超时检测 + 自动重试.
-// 共重试 Retries 次 (总尝试次数 = Retries + 1).
-func (r *Runner) RunRetry(fn func() error, opName string) error {
+// 共重试 retries 次 (总尝试次数 = retries + 1).
+// fn 接收 ctx (重试间复用同一 ctx) + attempt 索引: 0=首次, 1=第一次重试, 2+=第二次起.
+// 调用方可按 attempt 决定是否在重试前清理残留状态 (如 fetch 中断留下的 .git/shallow.lock).
+func (r *Runner) RunRetry(ctx context.Context, retries int, fn func(ctx context.Context, attempt int) error, opName string) error {
 	var lastErr error
-	for i := 0; i <= r.Retries; i++ {
+	for i := 0; i <= retries; i++ {
 		if i > 0 {
-			Logf("  [%s] 重试 %d/%d", opName, i, r.Retries)
+			tag := ""
+			if lastErr == context.DeadlineExceeded {
+				tag = " (超时)"
+			}
+			Logf("  [%s] 重试 %d/%d (上次失败%s: %v)", opName, i, retries, tag, lastErr)
 			time.Sleep(2 * time.Second)
 		}
-		lastErr = fn()
+		lastErr = fn(ctx, i)
 		if lastErr == nil {
 			return nil
-		}
-		if lastErr == context.DeadlineExceeded {
-			Logf("  [%s] 超时, 准备重试", opName)
 		}
 	}
 	return lastErr
