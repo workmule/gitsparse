@@ -111,13 +111,14 @@ func (p *Puller) freshSparseFetch(ctx context.Context, opts puller.Options, work
 			puller.Cache{}.CleanShallowLock(workDir)
 		}
 		return r.RunWithTimeout(ctx, opts.Timeout, workDir, "fetch", "--depth=1", "--no-tags",
-			"--progress", "origin", opts.Ref)
+			"origin", opts.Ref)
 	}, "fetch"); err != nil {
 		return err
 	}
 
-	// 4. checkout FETCH_HEAD
+	// 4. checkout FETCH_HEAD (被 kill 会留 index.lock, 清锁让整体重试能跑 fresh).
 	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "checkout", "FETCH_HEAD"); err != nil {
+		puller.Cache{}.CleanGitLocks(workDir)
 		return err
 	}
 
@@ -146,17 +147,17 @@ func (p *Puller) cacheSparseUpdate(ctx context.Context, opts puller.Options, wor
 			cache.CleanShallowLock(workDir)
 		}
 		return r.RunWithTimeout(ctx, opts.Timeout, workDir, "fetch", "--depth=1", "--no-tags",
-			"--progress", "origin", opts.Ref)
+			"origin", opts.Ref)
 	}, "fetch"); err != nil {
 		gitutil.Logf("  fetch 失败, 继续使用缓存旧版本: %v", err)
 		gitutil.Logf("Step 1 完成 (%s)", time.Since(t0))
 		return nil
 	}
 
-	// reset --hard FETCH_HEAD
+	// reset --hard FETCH_HEAD (被 kill 会留 index.lock, 清锁让整体重试能跑 fresh).
 	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "reset", "--hard", "FETCH_HEAD"); err != nil {
-		gitutil.Logf("  reset 失败, 清除缓存目录: %s", workDir)
-		os.RemoveAll(workDir)
+		cache.CleanGitLocks(workDir)
+		gitutil.Logf("  reset 失败: %v", err)
 		return err
 	}
 

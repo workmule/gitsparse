@@ -3,6 +3,7 @@ package puller
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/workmule/gitsparse/internal/gitutil"
@@ -38,11 +39,30 @@ func (c Cache) Hit(workDir string) bool {
 
 // CleanShallowLock 清理浅克隆 fetch 中断残留的 <workDir>/.git/shallow.lock.
 // 浅克隆 fetch 超时/中断会残留该锁文件, 导致后续 fetch 全部失败.
+//
+// ponytail: 已被 CleanGitLocks 覆盖, 保留作向后兼容 (调用方未迁移时仍可用).
 func (c Cache) CleanShallowLock(workDir string) {
-	lockPath := filepath.Join(workDir, ".git", "shallow.lock")
-	if _, err := os.Stat(lockPath); err == nil {
-		os.Remove(lockPath)
-		gitutil.Logf("  清理残留锁文件: .git/shallow.lock")
+	c.CleanGitLocks(workDir)
+}
+
+// CleanGitLocks 清理 <workDir>/.git/*.lock 残留锁文件.
+// git 命令超时/中断会留下锁: fetch 留 shallow.lock, reset/checkout 留 index.lock, 等.
+// 这些锁会导致后续 git 命令报 "Unable to create '...lock': File exists" 而失败.
+func (c Cache) CleanGitLocks(workDir string) {
+	gitDir := filepath.Join(workDir, ".git")
+	entries, err := os.ReadDir(gitDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		lockPath := filepath.Join(gitDir, name)
+		if err := os.Remove(lockPath); err == nil {
+			gitutil.Logf("  清理残留锁文件: .git/%s", name)
+		}
 	}
 }
 
