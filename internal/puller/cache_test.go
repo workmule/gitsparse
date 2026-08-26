@@ -199,7 +199,7 @@ func TestCopyDirsToOutput_Basic(t *testing.T) {
 	mustWriteFile(t, filepath.Join(srcRoot, "src", "main.go"), []byte("package main"))
 
 	output := t.TempDir()
-	err := CopyDirsToOutput(srcRoot, output, []string{"docs", "src"})
+	err := CopyDirsToOutput(srcRoot, output, []string{"docs", "src"}, false)
 	if err != nil {
 		t.Fatalf("CopyDirsToOutput: %v", err)
 	}
@@ -222,9 +222,29 @@ func TestCopyDirsToOutput_Basic(t *testing.T) {
 func TestCopyDirsToOutput_MissingDir(t *testing.T) {
 	srcRoot := t.TempDir()
 	output := t.TempDir()
-	err := CopyDirsToOutput(srcRoot, output, []string{"nonexistent"})
+	err := CopyDirsToOutput(srcRoot, output, []string{"nonexistent"}, false)
 	if err == nil {
 		t.Fatal("expected error for missing dir")
+	}
+}
+
+// TestCopyDirsToOutput_SkipMissingDir 验证 skipMissing=true 时跳过不存在目录, 其余正常拷贝.
+func TestCopyDirsToOutput_SkipMissingDir(t *testing.T) {
+	srcRoot := t.TempDir()
+	mustMkdirAll(t, filepath.Join(srcRoot, "docs"))
+	mustWriteFile(t, filepath.Join(srcRoot, "docs", "a.txt"), []byte("hello"))
+
+	output := t.TempDir()
+	err := CopyDirsToOutput(srcRoot, output, []string{"docs", "nonexistent"}, true)
+	if err != nil {
+		t.Fatalf("CopyDirsToOutput: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(output, "nonexistent")); !os.IsNotExist(err) {
+		t.Errorf("nonexistent should not be created in output, got err=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "docs", "a.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Errorf("docs/a.txt not copied correctly: data=%q err=%v", data, err)
 	}
 }
 
@@ -238,7 +258,7 @@ func TestCopyDirsToOutput_OverwritesExisting(t *testing.T) {
 	mustMkdirAll(t, filepath.Join(output, "docs"))
 	mustWriteFile(t, filepath.Join(output, "docs", "old.txt"), []byte("old"))
 
-	if err := CopyDirsToOutput(srcRoot, output, []string{"docs"}); err != nil {
+	if err := CopyDirsToOutput(srcRoot, output, []string{"docs"}, false); err != nil {
 		t.Fatalf("CopyDirsToOutput: %v", err)
 	}
 

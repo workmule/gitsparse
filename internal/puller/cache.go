@@ -80,8 +80,9 @@ func (c Cache) CleanExpired(cacheRoot string, ttl time.Duration) {
 // ============================================================================
 
 // CopyDirsToOutput 把 srcRoot 下的 dirs 各子目录拷贝到 outputDir 下同名路径.
-// 目标已存在则先删除再拷贝 (保证幂等). 源目录不存在则返回错误.
-func CopyDirsToOutput(srcRoot, outputDir string, dirs []string) error {
+// 目标已存在则先删除再拷贝 (保证幂等). 源目录不存在时:
+// skipMissing=true 跳过该目录继续, 否则返回错误.
+func CopyDirsToOutput(srcRoot, outputDir string, dirs []string, skipMissing bool) error {
 	gitutil.Logf("Step 3: 拷贝到输出目录")
 	t0 := time.Now()
 	for _, dir := range dirs {
@@ -89,6 +90,10 @@ func CopyDirsToOutput(srcRoot, outputDir string, dirs []string) error {
 		dst := filepath.Join(outputDir, dir)
 
 		if _, err := os.Stat(src); err != nil {
+			if skipMissing && os.IsNotExist(err) {
+				gitutil.Logf("  跳过 %s (源目录不存在)", dir)
+				continue
+			}
 			return err
 		}
 		gitutil.Logf("  拷贝 %s", dir)

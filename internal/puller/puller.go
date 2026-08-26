@@ -64,6 +64,9 @@ type Options struct {
 	// NoLFS true 时跳过 Git LFS 拉取.
 	NoLFS bool
 
+	// SkipMissingDirs true 时, -dirs 中在仓库里不存在的目录跳过而非报错.
+	SkipMissingDirs bool
+
 	// CacheTTL 缓存过期清理时间; 0 表示不清理.
 	CacheTTL time.Duration
 
@@ -180,7 +183,7 @@ func Run(p Puller, opts Options) error {
 	}
 
 	// Step 3: 拷贝目录到输出 (通用)
-	if err := CopyDirsToOutput(workDir, opts.Output, opts.Dirs); err != nil {
+	if err := CopyDirsToOutput(workDir, opts.Output, opts.Dirs, opts.SkipMissingDirs); err != nil {
 		return err
 	}
 

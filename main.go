@@ -19,7 +19,7 @@ import (
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x)
 // 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.2.0'"
-const Version = "v2.2.20260812165528"
+const Version = "v2.2.20260826123858"
 
 // ============================================================================
 // 设计说明 (v2.1.0 重构: 模式化)
@@ -100,6 +100,7 @@ func parseFlags() puller.Options {
 	cacheTTL := flag.Duration("cache-ttl", 24*time.Hour, "Cache TTL; entries older than this are cleaned up (0 = no cleanup)")
 	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
 	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
+	skipMissingDirs := flag.Bool("skip-missing-dirs", false, "Skip dirs that don't exist in the repo instead of failing")
 	mode := flag.String("mode", "full", "Pull mode (available: "+puller.AvailableModes()+")")
 	listModes := flag.Bool("list-modes", false, "List available pull modes and exit")
 	version := flag.Bool("version", false, "Print version and exit")
@@ -108,20 +109,21 @@ func parseFlags() puller.Options {
 	dirList := gitutil.SplitAndTrim(*dirs, ",")
 
 	return puller.Options{
-		Repo:         *repo,
-		Ref:          *ref,
-		Dirs:         dirList,
-		Output:       *output,
-		CacheDir:     *cacheDir,
-		Mode:         *mode,
-		NoCache:      *noCache,
-		NoLFS:        *noLFS,
-		CacheTTL:     *cacheTTL,
-		Timeout:      *timeout,
-		Retries:      *retries,
-		FetchRetries: *fetchRetries,
-		TotalTimeout: *totalTimeout,
-		Version:      *version,
-		ListModes:    *listModes,
+		Repo:            *repo,
+		Ref:             *ref,
+		Dirs:            dirList,
+		Output:          *output,
+		CacheDir:        *cacheDir,
+		Mode:            *mode,
+		NoCache:         *noCache,
+		NoLFS:           *noLFS,
+		SkipMissingDirs: *skipMissingDirs,
+		CacheTTL:        *cacheTTL,
+		Timeout:         *timeout,
+		Retries:         *retries,
+		FetchRetries:    *fetchRetries,
+		TotalTimeout:    *totalTimeout,
+		Version:         *version,
+		ListModes:       *listModes,
 	}
 }

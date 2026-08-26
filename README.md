@@ -80,6 +80,7 @@ gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,.
 | `-cache-ttl` | `24h` | 缓存 TTL；超过此时间的条目自动清理；`0` = 不清理 |
 | `-no-cache` | `false` | 跳过缓存，强制重新克隆 |
 | `-no-lfs` | `false` | 跳过 Git LFS 拉取（LFS 文件将保持为指针，非真实内容） |
+| `-skip-missing-dirs` | `false` | `-dirs` 中仓库里不存在的目录跳过而不报错 |
 
 ### 示例
 
