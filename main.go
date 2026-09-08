@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/workmule/gitsparse/internal/gitutil"
@@ -50,7 +51,8 @@ func main() {
 	}
 	// 打印模式列表
 	if opts.ListModes {
-		fmt.Printf("Available pull modes: %s\n", puller.AvailableModes())
+		fmt.Printf("Available pull modes: auto, %s\n", puller.AvailableModes())
+		fmt.Println("  auto: 按本地 git 版本自动选择, >= 2.25 用 snip, 否则用 full")
 		return
 	}
 	// 检查参数合法性
@@ -67,6 +69,14 @@ func main() {
 	}
 	fmt.Printf("[git] %s", out)
 
+	// auto 模式: 按本地 Git 版本解析为实际模式 (snip/full), 见 docs/design/prd-auto-mode.md.
+	// 必须在 puller.Get 之前: auto 是 CLI 层虚拟值, 未注册到模式注册表.
+	if opts.Mode == "auto" {
+		resolved, reason := resolveAutoMode(string(out))
+		gitutil.Logf("auto: %s", reason)
+		opts.Mode = resolved
+	}
+
 	gitutil.Logf("配置: mode=%s, timeout=%s, retries=%d, fetch-retries=%d, total-timeout=%s, cache=%s, ttl=%s",
 		opts.Mode,
 		gitutil.DurStr(opts.Timeout), opts.Retries, opts.FetchRetries, gitutil.DurStr(opts.TotalTimeout),
@@ -82,6 +92,21 @@ func main() {
 	if err := puller.Run(p, opts); err != nil {
 		gitutil.Failf("%v", err)
 	}
+}
+
+// resolveAutoMode 根据 `git --version` 的输出决定 auto 模式实际使用的模式名.
+// snip 需要 Git 2.25+ (sparse-checkout --cone); 版本不足或解析失败时保守退回 full.
+// 返回 (模式名, 决策原因); 原因用于日志, 帮助排查"为什么这台机器跑的是 full".
+func resolveAutoMode(gitVersionOutput string) (string, string) {
+	ver, err := gitutil.ParseGitVersion(gitVersionOutput)
+	if err != nil {
+		return "full", fmt.Sprintf("无法解析 git 版本输出 %q, 保守使用 full",
+			strings.TrimSpace(gitVersionOutput))
+	}
+	if gitutil.SupportsSparseCheckoutCone(ver) {
+		return "snip", fmt.Sprintf("git %d.%d.%d >= 2.25, 支持 sparse-checkout", ver[0], ver[1], ver[2])
+	}
+	return "full", fmt.Sprintf("git %d.%d.%d < 2.25, 不支持 sparse-checkout, 降级 full", ver[0], ver[1], ver[2])
 }
 
 // parseFlags 解析 CLI flag 并整理成 puller.Options.
@@ -101,7 +126,7 @@ func parseFlags() puller.Options {
 	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
 	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
 	skipMissingDirs := flag.Bool("skip-missing-dirs", false, "Skip dirs that don't exist in the repo instead of failing")
-	mode := flag.String("mode", "full", "Pull mode (available: "+puller.AvailableModes()+")")
+	mode := flag.String("mode", "full", "Pull mode (auto = detect git version; available: auto, "+puller.AvailableModes()+")")
 	listModes := flag.Bool("list-modes", false, "List available pull modes and exit")
 	version := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
