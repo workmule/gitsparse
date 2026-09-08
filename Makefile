@@ -30,6 +30,45 @@ FIX ?= true
 # 构建产物
 BIN ?= gitsparse
 
+# ============================================================================
+# 版本号规范 (必须遵守)
+# ============================================================================
+# 版本号格式: v<大版本>.<次版本>.<修订号>.<构建时间戳 YYYYMMDDHHMMSS>
+# 当前大版本号固定为 1, 只允许 v1.x.x.x, 不许调整大版本号!
+# 次版本/修订号: make bump 自动 +1 (LEVEL=patch/minor)
+# 最后一段构建时间戳由 make install 自动替换
+# version-check 会校验 main.go 中 Version 常量, 违规直接失败
+VERSION_MAJOR ?= 1
+
+# 校验 main.go 版本号符合 v$(VERSION_MAJOR).x.x.x 规范 (大版本号不许调整)
+.PHONY: version-check
+version-check:
+	@echo ">> [version] 检查版本号规范 (v$(VERSION_MAJOR).x.x.x, 大版本号固定)"
+	@if ! grep -qE '^const Version = "v$(VERSION_MAJOR)\.[0-9]+\.[0-9]+\.[0-9]+"' main.go; then \
+		echo "版本号违规: main.go 中 Version 必须为 v$(VERSION_MAJOR).x.x.x 格式"; \
+		echo "  当前值: $$(grep '^const Version' main.go)"; \
+		echo "  规范: 大版本号固定为 $(VERSION_MAJOR), 不许调整"; \
+		exit 1; \
+	fi
+
+# 自动递增版本号 (前置 version-check, 保证格式合法后才改):
+#   make bump             -> 修订号 +1           (v1.2.3.t -> v1.2.4.t)
+#   make bump LEVEL=minor -> 次版本 +1, 修订清零  (v1.2.3.t -> v1.3.0.t)
+# 大版本号与最后一段时间戳不动 (时间戳由 make install 替换)
+LEVEL ?= patch
+
+.PHONY: bump
+bump: version-check
+	@cur=$$(sed -n 's/^const Version = "\(v[0-9.]*\)"/\1/p' main.go); \
+	minor=$$(echo "$$cur" | cut -d. -f2); patch=$$(echo "$$cur" | cut -d. -f3); \
+	case "$(LEVEL)" in \
+		patch)  patch=$$((patch+1));; \
+		minor)  minor=$$((minor+1)); patch=0;; \
+		*)      echo ">> [bump] 失败: LEVEL 仅支持 patch/minor (当前: $(LEVEL))"; exit 1;; \
+	esac; \
+	sed -i -E 's/^(const Version = "v)[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+")/\1$(VERSION_MAJOR).'"$$minor.$$patch"'\2/' main.go; \
+	echo ">> [bump] $$cur -> v$(VERSION_MAJOR).$$minor.$$patch.$$(echo "$$cur" | cut -d. -f4)"
+
 # 快速测试 (含 LFS 自动检测 + 缓存复用)
 run:
 	@go run . -repo "$(REPO)" -ref "$(REF)" -dirs "$(DIRS)" -output "$(OUTPUT)" \
@@ -94,7 +133,7 @@ mod-tidy-check:
 
 # check: 聚合所有扫描检查 (build 的前置依赖)
 .PHONY: check
-check: fmt vet lint mod-tidy-check
+check: fmt vet lint mod-tidy-check version-check
 	@echo ">> [check] 所有扫描检查通过"
 
 # 构建二进制 (前置: check)
@@ -125,10 +164,11 @@ clean-cache:
 
 # 安装到 $GOBIN (或 $GOPATH/bin), 之后可直接 gitsparse ... 调用
 # 构建时把 main.go 的版本号最后一段替换为构建时刻 (YYYYMMDDHHMMSS), 便于区分构建版本
+# 前置 version-check: 防止大版本号被误改后继续安装
 .PHONY: install
-install:
+install: version-check
 	@$(eval BUILD_VER := $(shell date +%Y%m%d%H%M%S))
-	@sed -i -E 's/^(const Version = "v[0-9]+\.[0-9]+\.)([0-9]+)"/\1$(BUILD_VER)"/' main.go
+	@sed -i -E 's/^(const Version = "v[0-9]+\.[0-9]+\.[0-9]+\.)([0-9]+)"/\1$(BUILD_VER)"/' main.go
 	@echo ">> [install] go install (版本号末位改为 $(BUILD_VER))"
 	@$(GO) install .
 
@@ -160,4 +200,4 @@ test-docker-clean:
 	@docker-compose -f docker-compose.test.yml down --rmi local 2>/dev/null || true
 	@docker rmi gitsparse-test:alpine3.9 gitsparse-test:alpine3.11 gitsparse-test:alpine3.12 2>/dev/null || true
 
-.PHONY: run test test-short clean clean-cache install test-docker test-docker-all test-docker-clean
+.PHONY: run test test-short clean clean-cache install version-check bump test-docker test-docker-all test-docker-clean

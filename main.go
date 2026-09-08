@@ -18,9 +18,9 @@ import (
 	_ "github.com/workmule/gitsparse/internal/puller/snip"
 )
 
-// 版本号 — 每次发版修改此值 (格式: vx.x.x)
-// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.2.0'"
-const Version = "v2.2.20260826123858"
+// 版本号 — 每次发版修改此值 (格式: vx.x.x.x, 大版本号固定不许调整)
+// 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.2.0.1'"
+const Version = "v1.1.1.20260826123858"
 
 // ============================================================================
 // 设计说明 (v2.1.0 重构: 模式化)
