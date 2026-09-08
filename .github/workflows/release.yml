@@ -1,0 +1,54 @@
+# 自动发版: 监测 main.go 中 Version 常量, 前 3 段 (vx.x.x) 出现新版本且 tag 不存在时,
+# 自动打 tag 并创建 GitHub Release.
+# 触发场景: make bump 后提交推送 main.go → 自动发布对应 vx.x.x 版本.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [main.go]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # 创建 tag + release 需要
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验版本号规范 (复用 Makefile version-check)
+        run: make version-check
+
+      - name: 提取版本号 (只取前 3 段)
+        id: ver
+        run: |
+          tag="v$(sed -n 's/^const Version = "v\([0-9]\+\.[0-9]\+\.[0-9]\+\)\..*"/\1/p' main.go)"
+          if [ -z "${tag#v}" ]; then
+            echo "无法从 main.go 提取版本号"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo ">> 版本: $tag"
+
+      - name: 检查 tag 是否已存在
+        id: check
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo ">> tag $TAG 已存在, 跳过发布"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo ">> tag $TAG 不存在, 将发布"
+          fi
+
+      - name: 创建 tag + Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" --title "$TAG" --generate-notes
+          echo ">> 已发布 $TAG"
