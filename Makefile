@@ -9,6 +9,7 @@
 REPO ?= https://github.com/numpy/numpy.git
 REF ?= main
 DIRS ?= numpy
+FILES ?=
 OUTPUT ?= ./output
 # 超时 (每个网络操作, 0=不限)
 TIMEOUT ?= 1m
@@ -71,7 +72,7 @@ bump: version-check
 
 # 快速测试 (含 LFS 自动检测 + 缓存复用)
 run:
-	@go run . -repo "$(REPO)" -ref "$(REF)" -dirs "$(DIRS)" -output "$(OUTPUT)" \
+	@go run . -repo "$(REPO)" -ref "$(REF)" -dirs "$(DIRS)" -files "$(FILES)" -output "$(OUTPUT)" \
 		-timeout "$(TIMEOUT)" -retries $(RETRIES) \
 		-cache-ttl "$(CACHE_TTL)" -no-cache=$(NO_CACHE)
 

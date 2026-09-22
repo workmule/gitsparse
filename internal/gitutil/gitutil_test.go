@@ -221,19 +221,22 @@ func TestSplitAndTrim(t *testing.T) {
 
 func TestLfsIncludePatterns(t *testing.T) {
 	tests := []struct {
-		name string
-		dirs []string
-		want []string
+		name  string
+		dirs  []string
+		files []string
+		want  []string
 	}{
-		{"nil input", nil, nil},
-		{"empty input", []string{}, nil},
-		{"single dir", []string{"core"}, []string{"core/**"}},
-		{"multiple dirs", []string{"a", "b"}, []string{"a/**", "b/**"}},
-		{"nested path", []string{"src/vs"}, []string{"src/vs/**"}},
+		{"nil input", nil, nil, nil},
+		{"empty input", []string{}, nil, nil},
+		{"single dir", []string{"core"}, nil, []string{"core/**"}},
+		{"multiple dirs", []string{"a", "b"}, nil, []string{"a/**", "b/**"}},
+		{"nested path", []string{"src/vs"}, nil, []string{"src/vs/**"}},
+		{"file glob only", nil, []string{"common/protocol/*.xml"}, []string{"common/protocol/*.xml"}},
+		{"dirs + file globs", []string{"a"}, []string{"b/*.xml", "b/*.json"}, []string{"a/**", "b/*.xml", "b/*.json"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := LFSIncludePatterns(tt.dirs)
+			got := LFSIncludePatterns(tt.dirs, tt.files)
 			if len(got) != len(tt.want) {
 				t.Errorf("got %v, want %v", got, tt.want)
 				return
@@ -253,7 +256,7 @@ func TestLfsIncludePatterns_JoinForIncludeArg(t *testing.T) {
 		"ServerInternational/Common/Public/Dimension",
 		"ServerInternational/Common/Server/Global",
 	}
-	patterns := LFSIncludePatterns(dirs)
+	patterns := LFSIncludePatterns(dirs, nil)
 	joined := strings.Join(patterns, ",")
 
 	want := "ServerInternational/Common/Public/Global/**,ServerInternational/Common/Public/Dimension/**,ServerInternational/Common/Server/Global/**"
@@ -265,6 +268,39 @@ func TestLfsIncludePatterns_JoinForIncludeArg(t *testing.T) {
 	}
 	if len(patterns) != len(dirs) {
 		t.Errorf("patterns len = %d, want %d", len(patterns), len(dirs))
+	}
+}
+
+// ============================================================
+// PatternDirs
+// ============================================================
+
+func TestPatternDirs(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []string
+		want  []string
+	}{
+		{"nil input", nil, nil},
+		{"glob", []string{"common/protocol/*.xml"}, []string{"common/protocol"}},
+		{"dedupe parents", []string{"a/*.xml", "a/*.json", "b/*.md"}, []string{"a", "b"}},
+		{"root glob skipped", []string{"*.md"}, nil},
+		{"plain file", []string{"docs/readme.md"}, []string{"docs"}},
+		{"mixed root + nested", []string{"*.md", "docs/*.go"}, []string{"docs"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PatternDirs(tt.files)
+			if len(got) != len(tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] got %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
 

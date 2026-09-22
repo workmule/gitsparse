@@ -47,8 +47,12 @@ type Options struct {
 	// Ref 目标 ref: 分支名 / 标签 / commit SHA (必填).
 	Ref string
 
-	// Dirs 要拉取的子目录列表 (必填, 至少 1 个).
+	// Dirs 要拉取的子目录列表 (-dirs), 整目录拷贝到输出.
 	Dirs []string
+
+	// Files 要拉取的文件路径或 glob 模式列表 (-files), 如 "common/protocol/*.xml".
+	// 拉取层归约为父目录, 拷贝层按 glob 匹配. 与 Dirs 至少给一个.
+	Files []string
 
 	// Output 输出目录, 拉取的子目录会拷贝到 Output/<dir>.
 	Output string
@@ -66,6 +70,9 @@ type Options struct {
 
 	// SkipMissingDirs true 时, -dirs 中在仓库里不存在的目录跳过而非报错.
 	SkipMissingDirs bool
+
+	// SkipMissingFiles true 时, -files 中无匹配文件的 pattern 跳过而非报错.
+	SkipMissingFiles bool
 
 	// CacheTTL 缓存过期清理时间; 0 表示不清理.
 	CacheTTL time.Duration
@@ -102,8 +109,8 @@ func (o Options) Validate() error {
 	if o.Ref == "" {
 		return fmt.Errorf("-ref is required")
 	}
-	if len(o.Dirs) == 0 {
-		return fmt.Errorf("没有指定要拉取的目录 (-dirs)")
+	if len(o.Dirs) == 0 && len(o.Files) == 0 {
+		return fmt.Errorf("至少指定一个要拉取的目录 (-dirs) 或文件/glob 模式 (-files)")
 	}
 	return nil
 }
@@ -182,8 +189,11 @@ func Run(p Puller, opts Options) error {
 		return err
 	}
 
-	// Step 3: 拷贝目录到输出 (通用)
+	// Step 3: 拷贝目录/文件到输出 (通用)
 	if err := CopyDirsToOutput(workDir, opts.Output, opts.Dirs, opts.SkipMissingDirs); err != nil {
+		return err
+	}
+	if err := CopyFilesToOutput(workDir, opts.Output, opts.Files, opts.Dirs, opts.SkipMissingFiles); err != nil {
 		return err
 	}
 
@@ -222,7 +232,7 @@ func runLFS(ctx context.Context, r *gitutil.Runner, opts Options, workDir string
 	if !gitutil.HasLFSFiles(workDir) {
 		return nil
 	}
-	lfsIncludes := gitutil.LFSIncludePatterns(opts.Dirs)
+	lfsIncludes := gitutil.LFSIncludePatterns(opts.Dirs, opts.Files)
 	lfsIncludeArg := strings.Join(lfsIncludes, ",")
 	gitutil.Logf("Step 2: git lfs pull --include=%s", lfsIncludeArg)
 	t0 := time.Now()

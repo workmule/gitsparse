@@ -63,7 +63,7 @@ go run github.com/workmule/gitsparse@latest \
 ### 基本用法
 
 ```bash
-gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,...>
+gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,...> [-files <pattern1,pattern2,...>]
 ```
 
 ### 参数说明
@@ -72,7 +72,8 @@ gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,.
 |---|---|---|
 | `-repo` | （必填） | Git 仓库 URL |
 | `-ref` | （必填） | Git 引用：分支名、标签名或 commit SHA |
-| `-dirs` | （必填） | 要拉取的目录路径，多个用逗号分隔 |
+| `-dirs` | （可选） | 要拉取的目录路径（整目录拷贝），多个用逗号分隔；与 `-files` 至少给一个 |
+| `-files` | （可选） | 要拉取的文件路径或 glob 模式，如 `common/protocol/*.xml`，多个逗号分隔；输出保持原目录结构；匹配项位于 `-dirs` 目录内时跳过（整目录已覆盖） |
 | `-output` | `.` | 输出目录 |
 | `-timeout` | `1m` | 每个网络操作的超时时间；`0` = 不限时 |
 | `-retries` | `3` | 网络操作失败后的重试次数 |
@@ -81,6 +82,7 @@ gitsparse -repo <仓库URL> -ref <分支/标签/commit> -dirs <目录1,目录2,.
 | `-no-cache` | `false` | 跳过缓存，强制重新克隆 |
 | `-no-lfs` | `false` | 跳过 Git LFS 拉取（LFS 文件将保持为指针，非真实内容） |
 | `-skip-missing-dirs` | `false` | `-dirs` 中仓库里不存在的目录跳过而不报错 |
+| `-skip-missing-files` | `false` | `-files` 中无匹配文件的 pattern 跳过而不报错 |
 
 ### 示例
 
@@ -103,6 +105,18 @@ gitsparse \
     -dirs src/vs,build \
     -output ./vscode-src
 ```
+
+按 glob 模糊匹配拉取文件（输出保持目录结构，仅拷贝匹配文件）：
+
+```bash
+gitsparse \
+    -repo https://github.com/numpy/numpy.git \
+    -ref main \
+    -files "numpy/*.py,numpy/py.typed" \
+    -output ./numpy-files
+```
+
+`-dirs` 与 `-files` 可组合使用：整目录 + 指定类型文件；匹配项落在 `-dirs` 目录内时自动去重不重复拷贝。
 
 拉取特定 commit：
 

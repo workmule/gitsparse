@@ -190,6 +190,103 @@ func TestCache_CleanExpired_ZeroTTL_NoCleanup(t *testing.T) {
 // CopyDirsToOutput
 // ============================================================
 
+// ============================================================
+// CopyFilesToOutput
+// ============================================================
+
+// TestCopyFilesToOutput_Glob 验证 glob 只拷贝匹配文件, 未匹配文件不拷贝.
+func TestCopyFilesToOutput_Glob(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(filepath.Join(src, "common/protocol"), 0755)
+	os.WriteFile(filepath.Join(src, "common/protocol/a.xml"), []byte("xml"), 0644)
+	os.WriteFile(filepath.Join(src, "common/protocol/b.json"), []byte("json"), 0644)
+
+	out := filepath.Join(dir, "out")
+	err := CopyFilesToOutput(src, out, []string{"common/protocol/*.xml"}, nil, false)
+	if err != nil {
+		t.Fatalf("CopyFilesToOutput: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "common/protocol/a.xml")); err != nil {
+		t.Errorf("匹配文件未拷贝: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "common/protocol/b.json")); err == nil {
+		t.Errorf("未匹配文件不应被拷贝")
+	}
+}
+
+// TestCopyFilesToOutput_MultiGlobs 验证多 pattern 组合拷贝 (如 *.xml + *.json).
+func TestCopyFilesToOutput_MultiGlobs(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(filepath.Join(src, "proto"), 0755)
+	os.WriteFile(filepath.Join(src, "proto/a.xml"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(src, "proto/b.json"), []byte("j"), 0644)
+	os.WriteFile(filepath.Join(src, "proto/c.txt"), []byte("t"), 0644)
+
+	out := filepath.Join(dir, "out")
+	pats := []string{"proto/*.xml", "proto/*.json"}
+	if err := CopyFilesToOutput(src, out, pats, nil, false); err != nil {
+		t.Fatalf("CopyFilesToOutput: %v", err)
+	}
+	for _, f := range []string{"proto/a.xml", "proto/b.json"} {
+		if _, err := os.Stat(filepath.Join(out, f)); err != nil {
+			t.Errorf("缺少 %s: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(out, "proto/c.txt")); err == nil {
+		t.Errorf("c.txt 不应被拷贝")
+	}
+}
+
+// TestCopyFilesToOutput_NoMatch 验证 0 匹配: skipMissing=false 报错, true 跳过.
+func TestCopyFilesToOutput_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(src, 0755)
+
+	if err := CopyFilesToOutput(src, dir, []string{"nope/*.xml"}, nil, false); err == nil {
+		t.Errorf("0 匹配且 skipMissing=false 应报错")
+	}
+	if err := CopyFilesToOutput(src, dir, []string{"nope/*.xml"}, nil, true); err != nil {
+		t.Errorf("0 匹配且 skipMissing=true 应跳过: %v", err)
+	}
+}
+
+// TestCopyFilesToOutput_SkipUnderDirs 验证匹配项位于 -dirs 目录内时跳过 (整目录拷贝已覆盖).
+func TestCopyFilesToOutput_SkipUnderDirs(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(filepath.Join(src, "common/protocol"), 0755)
+	os.WriteFile(filepath.Join(src, "common/protocol/a.xml"), []byte("x"), 0644)
+
+	out := filepath.Join(dir, "out")
+	err := CopyFilesToOutput(src, out, []string{"common/protocol/*.xml"}, []string{"common"}, false)
+	if err != nil {
+		t.Fatalf("CopyFilesToOutput: %v", err)
+	}
+	// 跳过 = 不由 CopyFilesToOutput 拷贝 (该场景下 dirs 拷贝由 CopyDirsToOutput 负责)
+	if _, err := os.Stat(filepath.Join(out, "common/protocol/a.xml")); err == nil {
+		t.Errorf("位于 -dirs 内的匹配项应跳过")
+	}
+}
+
+// TestCopyFilesToOutput_DirMatch 验证 glob 匹配到目录时整目录拷贝.
+func TestCopyFilesToOutput_DirMatch(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	os.MkdirAll(filepath.Join(src, "pkg/tool"), 0755)
+	os.WriteFile(filepath.Join(src, "pkg/tool/a.go"), []byte("go"), 0644)
+
+	out := filepath.Join(dir, "out")
+	if err := CopyFilesToOutput(src, out, []string{"pkg/*"}, nil, false); err != nil {
+		t.Fatalf("CopyFilesToOutput: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "pkg/tool/a.go")); err != nil {
+		t.Errorf("目录匹配未整拷: %v", err)
+	}
+}
+
 // TestCopyDirsToOutput_Basic 验证把 srcRoot 下的多个目录拷贝到 output.
 func TestCopyDirsToOutput_Basic(t *testing.T) {
 	srcRoot := t.TempDir()

@@ -264,7 +264,50 @@ func TestPull_CommitSHA_Snip(t *testing.T) {
 	assertFileContent(t, filepath.Join(outputDir, "docs", "file.txt"), "sha-content")
 }
 
-// TestPull_MultiDirs_Snip 验证 snip 模式多目录拉取: sparse-checkout set <dir1> <dir2>.
+// TestPull_FilesGlob_Snip 验证 snip 模式 -files glob: sparse 归约为父目录, 输出仅含匹配文件.
+func TestPull_FilesGlob_Snip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	skipIfLowGit(t)
+	r := &gitutil.Runner{}
+
+	srcRepo := initTempRepo(t)
+	mustMkdirAll(t, filepath.Join(srcRepo, "common/protocol"))
+	mustWriteFile(t, filepath.Join(srcRepo, "common/protocol/a.xml"), []byte("<a/>"))
+	mustWriteFile(t, filepath.Join(srcRepo, "common/protocol/b.json"), []byte("{}"))
+	mustMkdirAll(t, filepath.Join(srcRepo, "other"))
+	mustWriteFile(t, filepath.Join(srcRepo, "other/c.txt"), []byte("c"))
+	mustRunGit(t, r, srcRepo, "add", ".")
+	mustRunGit(t, r, srcRepo, "commit", "-m", "add files")
+
+	bareRepo := filepath.Join(t.TempDir(), "bare.git")
+	if err := r.Run(context.Background(), "", "clone", "--bare", srcRepo, bareRepo); err != nil {
+		t.Fatalf("clone --bare: %v", err)
+	}
+
+	cacheDir := t.TempDir()
+	outputDir := t.TempDir()
+	p := &Puller{}
+	if err := puller.Run(p, puller.Options{
+		Repo: bareRepo, Ref: "master", Files: []string{"common/protocol/*.xml", "common/protocol/*.json"},
+		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true,
+	}); err != nil {
+		t.Fatalf("Pull files glob: %v", err)
+	}
+
+	// 匹配的两个文件按原目录结构输出
+	assertFileContent(t, filepath.Join(outputDir, "common/protocol/a.xml"), "<a/>")
+	assertFileContent(t, filepath.Join(outputDir, "common/protocol/b.json"), "{}")
+
+	// 未匹配目录不输出
+	if _, err := os.Stat(filepath.Join(outputDir, "other")); !os.IsNotExist(err) {
+		t.Errorf("other/ 不应被拷贝到输出 (err=%v)", err)
+	}
+}
+
+// TestPull_MultiDirs_Snip 验证 snip 模式 dirs+files 组合拉取:
+// -dirs 拉整目录 docs, -files glob 拉另一个目录中的指定文件 (sparse 归约为父目录).
 func TestPull_MultiDirs_Snip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -277,6 +320,7 @@ func TestPull_MultiDirs_Snip(t *testing.T) {
 	mustWriteFile(t, filepath.Join(srcRepo, "docs", "a.txt"), []byte("aaa"))
 	mustMkdirAll(t, filepath.Join(srcRepo, "src"))
 	mustWriteFile(t, filepath.Join(srcRepo, "src", "b.txt"), []byte("bbb"))
+	mustWriteFile(t, filepath.Join(srcRepo, "src", "b.md"), []byte("md"))
 	mustMkdirAll(t, filepath.Join(srcRepo, "test"))
 	mustWriteFile(t, filepath.Join(srcRepo, "test", "c.txt"), []byte("ccc"))
 	mustRunGit(t, r, srcRepo, "add", ".")
@@ -291,17 +335,23 @@ func TestPull_MultiDirs_Snip(t *testing.T) {
 	outputDir := t.TempDir()
 	p := &Puller{}
 	if err := puller.Run(p, puller.Options{
-		Repo: bareRepo, Ref: "master", Dirs: []string{"docs", "src"},
+		Repo: bareRepo, Ref: "master",
+		Dirs:   []string{"docs"},
+		Files:  []string{"src/*.txt"},
 		Output: outputDir, CacheDir: cacheDir, NoCache: true, NoLFS: true,
 	}); err != nil {
-		t.Fatalf("Pull multi-dirs: %v", err)
+		t.Fatalf("Pull dirs+files: %v", err)
 	}
 
-	// 两个指定目录应存在
+	// -dirs 整目录拷贝
 	assertFileContent(t, filepath.Join(outputDir, "docs", "a.txt"), "aaa")
+	// -files glob 只拷贝匹配文件 (b.md 不拷贝)
 	assertFileContent(t, filepath.Join(outputDir, "src", "b.txt"), "bbb")
+	if _, err := os.Stat(filepath.Join(outputDir, "src", "b.md")); !os.IsNotExist(err) {
+		t.Errorf("未匹配文件 b.md 不应被拷贝 (err=%v)", err)
+	}
 
-	// 未指定的 test 目录不应存在于工作区
+	// 未指定的 test 目录不应存在于工作区 (sparse 覆盖 docs + src 两个目录)
 	workDir := filepath.Join(cacheDir, gitutil.CacheHash(bareRepo, "master", "snip"))
 	if _, err := os.Stat(filepath.Join(workDir, "test")); !os.IsNotExist(err) {
 		t.Errorf("sparse-checkout 未生效: test/ 不应存在于工作区 (err=%v)", err)

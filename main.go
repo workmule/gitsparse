@@ -20,7 +20,7 @@ import (
 
 // 版本号 — 每次发版修改此值 (格式: vx.x.x.x, 大版本号固定不许调整)
 // 通过 ldflags 可在构建时覆盖: go build -ldflags "-X 'main.Version=v2.2.0.1'"
-const Version = "v1.1.1.20260908194910"
+const Version = "v1.2.1.20260922202803"
 
 // ============================================================================
 // 设计说明 (v2.1.0 重构: 模式化)
@@ -115,7 +115,8 @@ func resolveAutoMode(gitVersionOutput string) (string, string) {
 func parseFlags() puller.Options {
 	repo := flag.String("repo", "", "Git repository URL")
 	ref := flag.String("ref", "", "Git ref: branch name, tag, or commit SHA")
-	dirs := flag.String("dirs", "", "Comma-separated directory paths to pull")
+	dirs := flag.String("dirs", "", "Comma-separated directory paths to pull (whole dirs)")
+	files := flag.String("files", "", "Comma-separated file paths/globs to pull, e.g. common/protocol/*.xml (combined with -dirs)")
 	output := flag.String("output", ".", "Output directory")
 	timeout := flag.Duration("timeout", time.Minute, "Timeout per network operation (clone/fetch/lfs); 0 = no timeout")
 	retries := flag.Int("retries", 3, "Retry count for network operations")
@@ -126,29 +127,33 @@ func parseFlags() puller.Options {
 	noCache := flag.Bool("no-cache", false, "Skip cache, force fresh clone")
 	noLFS := flag.Bool("no-lfs", false, "Skip Git LFS pull (LFS files will be pointers, not real content)")
 	skipMissingDirs := flag.Bool("skip-missing-dirs", false, "Skip dirs that don't exist in the repo instead of failing")
+	skipMissingFiles := flag.Bool("skip-missing-files", false, "Skip file globs that match nothing in the repo instead of failing")
 	mode := flag.String("mode", "full", "Pull mode (auto = detect git version; available: auto, "+puller.AvailableModes()+")")
 	listModes := flag.Bool("list-modes", false, "List available pull modes and exit")
 	version := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
 	dirList := gitutil.SplitAndTrim(*dirs, ",")
+	fileList := gitutil.SplitAndTrim(*files, ",")
 
 	return puller.Options{
-		Repo:            *repo,
-		Ref:             *ref,
-		Dirs:            dirList,
-		Output:          *output,
-		CacheDir:        *cacheDir,
-		Mode:            *mode,
-		NoCache:         *noCache,
-		NoLFS:           *noLFS,
-		SkipMissingDirs: *skipMissingDirs,
-		CacheTTL:        *cacheTTL,
-		Timeout:         *timeout,
-		Retries:         *retries,
-		FetchRetries:    *fetchRetries,
-		TotalTimeout:    *totalTimeout,
-		Version:         *version,
-		ListModes:       *listModes,
+		Repo:             *repo,
+		Ref:              *ref,
+		Dirs:             dirList,
+		Files:            fileList,
+		Output:           *output,
+		CacheDir:         *cacheDir,
+		Mode:             *mode,
+		NoCache:          *noCache,
+		NoLFS:            *noLFS,
+		SkipMissingDirs:  *skipMissingDirs,
+		SkipMissingFiles: *skipMissingFiles,
+		CacheTTL:         *cacheTTL,
+		Timeout:          *timeout,
+		Retries:          *retries,
+		FetchRetries:     *fetchRetries,
+		TotalTimeout:     *totalTimeout,
+		Version:          *version,
+		ListModes:        *listModes,
 	}
 }

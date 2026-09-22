@@ -96,12 +96,17 @@ func (p *Puller) freshSparseFetch(ctx context.Context, opts puller.Options, work
 	}
 
 	// 2. sparse-checkout init --cone + set <dirs>
+	// cone 只认目录: -files 的 glob pattern 归约为父目录 (PatternDirs);
+	// 全部为根级 pattern 时 sparseDirs 为空, 跳过 set (cone 默认检出根文件).
 	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, "sparse-checkout", "init", "--cone"); err != nil {
 		return err
 	}
-	setArgs := append([]string{"sparse-checkout", "set"}, opts.Dirs...)
-	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
-		return err
+	sparseDirs := append(opts.Dirs, gitutil.PatternDirs(opts.Files)...)
+	if len(sparseDirs) > 0 {
+		setArgs := append([]string{"sparse-checkout", "set"}, sparseDirs...)
+		if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
+			return err
+		}
 	}
 
 	// 3. fetch --depth=1
@@ -135,10 +140,13 @@ func (p *Puller) cacheSparseUpdate(ctx context.Context, opts puller.Options, wor
 	cache := puller.Cache{NoCache: opts.NoCache}
 	cache.CleanShallowLock(workDir)
 
-	// sparse-checkout set (dirs 可能变化)
-	setArgs := append([]string{"sparse-checkout", "set"}, opts.Dirs...)
-	if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
-		return err
+	// sparse-checkout set (dirs 可能变化; -files 的 glob 归约为父目录, 全为根级 pattern 时跳过)
+	sparseDirs := append(opts.Dirs, gitutil.PatternDirs(opts.Files)...)
+	if len(sparseDirs) > 0 {
+		setArgs := append([]string{"sparse-checkout", "set"}, sparseDirs...)
+		if err := r.RunWithTimeout(ctx, opts.Timeout, workDir, setArgs...); err != nil {
+			return err
+		}
 	}
 
 	// fetch (失败不致命). attempt>=2 时清理残留 shallow.lock (第二次重试起).

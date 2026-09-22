@@ -306,11 +306,29 @@ func HasLFSFiles(repoDir string) bool {
 	return strings.Contains(string(data), "filter=lfs")
 }
 
-// LFSIncludePatterns 生成 LFS --include 路径模式 (每目录加 /** 通配).
-func LFSIncludePatterns(dirs []string) []string {
+// PatternDirs 把文件 pattern 列表归约为去重的父目录列表 (供 sparse-checkout 等目录级操作用).
+// "common/protocol/*.xml" → "common/protocol"; 根级 pattern ("*.md") 的父目录为 ".",
+// 跳过 (cone 模式根文件默认全检出, 无需设置).
+func PatternDirs(files []string) []string {
+	seen := map[string]bool{}
+	var dirs []string
+	for _, f := range files {
+		d := filepath.Dir(f)
+		if d == "." || seen[d] {
+			continue
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	return dirs
+}
+
+// LFSIncludePatterns 生成 LFS --include 路径模式: 每目录加 "/**" 通配;
+// 文件 pattern 原样追加 (LFS --include 原生支持 glob 语法, 如 "common/protocol/*.xml").
+func LFSIncludePatterns(dirs, files []string) []string {
 	var patterns []string
 	for _, d := range dirs {
 		patterns = append(patterns, d+"/**")
 	}
-	return patterns
+	return append(patterns, files...)
 }

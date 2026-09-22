@@ -1,6 +1,8 @@
 package puller
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +68,89 @@ func (c Cache) CleanGitLocks(workDir string) {
 	}
 }
 
+// ============================================================================
+// CopyFilesToOutput — 按 glob 拷贝文件到输出 (所有拉取模式通用)
+// ============================================================================
+
+// CopyFilesToOutput 把 srcRoot 下匹配 files glob 的文件/目录拷贝到 outputDir 对应路径
+// (保持目录结构, 如 "common/protocol/*.xml" → <output>/common/protocol/xxx.xml).
+// 匹配项若已位于 dirs (-dirs) 中某目录内则跳过, 避免与整目录拷贝重复.
+// glob 0 匹配时: skipMissing=true 跳过该 pattern, 否则返回错误.
+func CopyFilesToOutput(srcRoot, outputDir string, files, dirs []string, skipMissing bool) error {
+	if len(files) == 0 {
+		return nil
+	}
+	gitutil.Logf("Step 3: 拷贝匹配文件到输出 (%d 个 pattern)", len(files))
+	t0 := time.Now()
+	for _, pat := range files {
+		matches, err := filepath.Glob(filepath.Join(srcRoot, pat))
+		if err != nil {
+			return fmt.Errorf("无效的 pattern %q: %w", pat, err)
+		}
+		if len(matches) == 0 {
+			if skipMissing {
+				gitutil.Logf("  跳过 %s (无匹配文件)", pat)
+				continue
+			}
+			return fmt.Errorf("pattern %q 没有匹配到任何文件", pat)
+		}
+		for _, src := range matches {
+			rel, err := filepath.Rel(srcRoot, src)
+			if err != nil {
+				return err
+			}
+			if underAnyDir(rel, dirs) {
+				continue // 已被 -dirs 整目录拷贝覆盖
+			}
+			if err := copyPath(src, filepath.Join(outputDir, rel)); err != nil {
+				return err
+			}
+		}
+	}
+	gitutil.Logf("Step 3 完成 (%s)", time.Since(t0))
+	return nil
+}
+
+// underAnyDir 判断 rel 路径是否位于 dirs 中任一目录内 (等于或为其子路径).
+func underAnyDir(rel string, dirs []string) bool {
+	for _, d := range dirs {
+		if rel == d || strings.HasPrefix(rel, d+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// copyPath 拷贝单个文件 (保持父目录) 或整目录 (目标先删再拷, 幂等) 到 dst.
+func copyPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		os.RemoveAll(dst)
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return err
+		}
+		return gitutil.CopyDir(src, dst)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
 // CleanExpired 清理 cacheRoot 下超过 ttl 的缓存条目.
 // ttl <= 0 时不清理.
 func (c Cache) CleanExpired(cacheRoot string, ttl time.Duration) {
@@ -83,7 +168,10 @@ func (c Cache) CleanExpired(cacheRoot string, ttl time.Duration) {
 // 目标已存在则先删除再拷贝 (保证幂等). 源目录不存在时:
 // skipMissing=true 跳过该目录继续, 否则返回错误.
 func CopyDirsToOutput(srcRoot, outputDir string, dirs []string, skipMissing bool) error {
-	gitutil.Logf("Step 3: 拷贝到输出目录")
+	if len(dirs) == 0 {
+		return nil
+	}
+	gitutil.Logf("Step 3: 拷贝目录到输出")
 	t0 := time.Now()
 	for _, dir := range dirs {
 		src := filepath.Join(srcRoot, dir)
